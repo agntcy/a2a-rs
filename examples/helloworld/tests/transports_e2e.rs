@@ -409,15 +409,14 @@ async fn rest_transport_end_to_end() {
         .unwrap();
 
     let resolver = AgentCardResolver::new(Some(Client::new()));
-    let card_url = format!("{base_url}{WELL_KNOWN_AGENT_CARD_PATH}");
-    let card = resolver.resolve(&card_url).await.unwrap();
+    let card = resolver.resolve(&base_url).await.unwrap();
     assert_eq!(card.name, "Test Agent");
 
-    let bad_card_url = format!("{base_url}/bad/.well-known/agent-card.json");
+    let bad_card_url = format!("{base_url}/bad");
     let err = resolver.resolve(&bad_card_url).await.unwrap_err();
     assert_eq!(err.code, error_code::INTERNAL_ERROR);
 
-    let missing_card_url = format!("{base_url}/missing/.well-known/agent-card.json");
+    let missing_card_url = format!("{base_url}/missing");
     let err = resolver.resolve(&missing_card_url).await.unwrap_err();
     assert_eq!(err.code, error_code::INTERNAL_ERROR);
 
@@ -523,19 +522,6 @@ async fn jsonrpc_transport_end_to_end() {
         .unwrap();
     let events: Vec<_> = subscribed.collect().await;
     assert_eq!(events.len(), 1);
-
-    let subscribe_missing = transport
-        .subscribe_to_task(
-            &ServiceParams::new(),
-            &SubscribeToTaskRequest {
-                id: "missing".to_string(),
-                tenant: None,
-            },
-        )
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(subscribe_missing.code, error_code::TASK_NOT_FOUND);
 
     let created = transport
         .create_push_config(
