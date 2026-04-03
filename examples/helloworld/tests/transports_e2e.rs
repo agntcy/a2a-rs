@@ -408,21 +408,24 @@ async fn rest_transport_end_to_end() {
         .await
         .unwrap();
 
-    let resolver = AgentCardResolver::new(Client::new());
+    let resolver = AgentCardResolver::new(Some(Client::new()));
+    let card_url = format!("{base_url}{WELL_KNOWN_AGENT_CARD_PATH}");
     let card = resolver
-        .resolve(format!("{base_url}{WELL_KNOWN_AGENT_CARD_PATH}"))
+        .resolve(&card_url)
         .await
         .unwrap();
     assert_eq!(card.name, "Test Agent");
 
+    let bad_card_url = format!("{base_url}/bad/.well-known/agent-card.json");
     let err = resolver
-        .resolve(format!("{base_url}/bad/.well-known/agent-card.json"))
+        .resolve(&bad_card_url)
         .await
         .unwrap_err();
     assert_eq!(err.code, error_code::INTERNAL_ERROR);
 
+    let missing_card_url = format!("{base_url}/missing/.well-known/agent-card.json");
     let err = resolver
-        .resolve(format!("{base_url}/missing/.well-known/agent-card.json"))
+        .resolve(&missing_card_url)
         .await
         .unwrap_err();
     assert_eq!(err.code, error_code::INTERNAL_ERROR);
@@ -539,7 +542,8 @@ async fn jsonrpc_transport_end_to_end() {
             },
         )
         .await
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert_eq!(subscribe_missing.code, error_code::TASK_NOT_FOUND);
 
     let created = transport
