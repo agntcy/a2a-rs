@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/agntcy/a2a-rs/compare/agntcy-a2a-pb-v0.1.0...agntcy-a2a-pb-v0.1.1) - 2026-04-03
+
+### Other
+
+- add crate readmes for crates.io
+
 ## [0.1.0](https://github.com/agntcy/a2a-rs/releases/tag/a2a-pb-v0.1.0) - 2026-04-03
 
 ### Added
