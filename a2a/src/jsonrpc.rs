@@ -135,17 +135,17 @@ impl From<i64> for JsonRpcId {
 // ---------------------------------------------------------------------------
 
 pub mod methods {
-    pub const SEND_MESSAGE: &str = "message.send";
-    pub const SEND_STREAMING_MESSAGE: &str = "message.stream";
-    pub const GET_TASK: &str = "tasks.get";
-    pub const LIST_TASKS: &str = "tasks.list";
-    pub const CANCEL_TASK: &str = "tasks.cancel";
-    pub const SUBSCRIBE_TO_TASK: &str = "tasks.resubscribe";
-    pub const CREATE_PUSH_CONFIG: &str = "push-config.set";
-    pub const GET_PUSH_CONFIG: &str = "push-config.get";
-    pub const LIST_PUSH_CONFIGS: &str = "push-config.list";
-    pub const DELETE_PUSH_CONFIG: &str = "push-config.delete";
-    pub const GET_EXTENDED_AGENT_CARD: &str = "agent-card.extended.get";
+    pub const SEND_MESSAGE: &str = "SendMessage";
+    pub const SEND_STREAMING_MESSAGE: &str = "SendStreamingMessage";
+    pub const GET_TASK: &str = "GetTask";
+    pub const LIST_TASKS: &str = "ListTasks";
+    pub const CANCEL_TASK: &str = "CancelTask";
+    pub const SUBSCRIBE_TO_TASK: &str = "SubscribeToTask";
+    pub const CREATE_PUSH_CONFIG: &str = "CreateTaskPushNotificationConfig";
+    pub const GET_PUSH_CONFIG: &str = "GetTaskPushNotificationConfig";
+    pub const LIST_PUSH_CONFIGS: &str = "ListTaskPushNotificationConfigs";
+    pub const DELETE_PUSH_CONFIG: &str = "DeleteTaskPushNotificationConfig";
+    pub const GET_EXTENDED_AGENT_CARD: &str = "GetExtendedAgentCard";
 
     pub fn is_streaming(method: &str) -> bool {
         matches!(method, SEND_STREAMING_MESSAGE | SUBSCRIBE_TO_TASK)
@@ -195,12 +195,12 @@ mod tests {
     fn test_jsonrpc_request_roundtrip() {
         let req = JsonRpcRequest::new(
             JsonRpcId::String("req-1".into()),
-            "message.send",
+            methods::SEND_MESSAGE,
             Some(serde_json::json!({"key": "value"})),
         );
         let json = serde_json::to_string(&req).unwrap();
         let back: JsonRpcRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.method, "message.send");
+        assert_eq!(back.method, methods::SEND_MESSAGE);
         assert_eq!(back.jsonrpc, "2.0");
     }
 
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_jsonrpc_request_no_params() {
-        let req = JsonRpcRequest::new(JsonRpcId::Number(1), "tasks.get", None);
+        let req = JsonRpcRequest::new(JsonRpcId::Number(1), methods::GET_TASK, None);
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("params"));
     }
@@ -291,6 +291,8 @@ mod tests {
     fn test_methods_is_streaming() {
         assert!(methods::is_streaming(methods::SEND_STREAMING_MESSAGE));
         assert!(methods::is_streaming(methods::SUBSCRIBE_TO_TASK));
+        assert!(!methods::is_streaming("message.stream"));
+        assert!(!methods::is_streaming("tasks.resubscribe"));
         assert!(!methods::is_streaming(methods::SEND_MESSAGE));
         assert!(!methods::is_streaming(methods::GET_TASK));
         assert!(!methods::is_streaming("unknown"));
@@ -309,6 +311,17 @@ mod tests {
         assert!(methods::is_valid(methods::LIST_PUSH_CONFIGS));
         assert!(methods::is_valid(methods::DELETE_PUSH_CONFIG));
         assert!(methods::is_valid(methods::GET_EXTENDED_AGENT_CARD));
+        assert!(!methods::is_valid("message.send"));
+        assert!(!methods::is_valid("message.stream"));
+        assert!(!methods::is_valid("tasks.get"));
+        assert!(!methods::is_valid("tasks.list"));
+        assert!(!methods::is_valid("tasks.cancel"));
+        assert!(!methods::is_valid("tasks.resubscribe"));
+        assert!(!methods::is_valid("push-config.set"));
+        assert!(!methods::is_valid("push-config.get"));
+        assert!(!methods::is_valid("push-config.list"));
+        assert!(!methods::is_valid("push-config.delete"));
+        assert!(!methods::is_valid("agent-card.extended.get"));
         assert!(!methods::is_valid("unknown.method"));
     }
 }

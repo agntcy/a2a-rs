@@ -291,16 +291,31 @@ mod tests {
                 "parts": [{"text": "hello"}]
             }
         });
-        let resp = post_jsonrpc(app, "message.send", params).await;
+        let resp = post_jsonrpc(app, methods::SEND_MESSAGE, params).await;
         assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
         assert!(resp.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_send_message_legacy_method_rejected() {
+        let app = make_app();
+        let params = serde_json::json!({
+            "message": {
+                "messageId": "m1",
+                "role": "ROLE_USER",
+                "parts": [{"text": "hello"}]
+            }
+        });
+        let resp = post_jsonrpc(app, "message.send", params).await;
+        assert!(resp.error.is_some(), "unexpected result: {:?}", resp.result);
+        assert_eq!(resp.error.unwrap().code, error_code::METHOD_NOT_FOUND);
     }
 
     #[tokio::test]
     async fn test_get_task_not_found() {
         let app = make_app();
         let params = serde_json::json!({"id": "nonexistent"});
-        let resp = post_jsonrpc(app, "tasks.get", params).await;
+        let resp = post_jsonrpc(app, methods::GET_TASK, params).await;
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, error_code::TASK_NOT_FOUND);
     }
@@ -326,7 +341,7 @@ mod tests {
         let rpc = serde_json::json!({
             "jsonrpc": "1.0",
             "id": 1,
-            "method": "message.send",
+            "method": methods::SEND_MESSAGE,
             "params": {}
         });
         let body = serde_json::to_string(&rpc).unwrap();
@@ -346,7 +361,7 @@ mod tests {
     async fn test_invalid_params() {
         let app = make_app();
         let params = serde_json::json!({"bogus": true});
-        let resp = post_jsonrpc(app, "message.send", params).await;
+        let resp = post_jsonrpc(app, methods::SEND_MESSAGE, params).await;
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, error_code::PARSE_ERROR);
     }
@@ -355,7 +370,7 @@ mod tests {
     async fn test_list_tasks() {
         let app = make_app();
         let params = serde_json::json!({});
-        let resp = post_jsonrpc(app, "tasks.list", params).await;
+        let resp = post_jsonrpc(app, methods::LIST_TASKS, params).await;
         assert!(resp.result.is_some());
     }
 
@@ -363,7 +378,7 @@ mod tests {
     async fn test_cancel_task_not_found() {
         let app = make_app();
         let params = serde_json::json!({"id": "nonexistent"});
-        let resp = post_jsonrpc(app, "tasks.cancel", params).await;
+        let resp = post_jsonrpc(app, methods::CANCEL_TASK, params).await;
         assert!(resp.error.is_some());
     }
 
@@ -376,7 +391,7 @@ mod tests {
                 "url": "http://example.com/callback"
             }
         });
-        let resp = post_jsonrpc(app, "tasks.pushNotificationConfig.create", params).await;
+        let resp = post_jsonrpc(app, methods::CREATE_PUSH_CONFIG, params).await;
         // May fail since task doesn't exist, but method is dispatched
         assert!(resp.error.is_some() || resp.result.is_some());
     }
@@ -388,7 +403,7 @@ mod tests {
             "taskId": "t1",
             "id": "cfg1"
         });
-        let resp = post_jsonrpc(app, "tasks.pushNotificationConfig.get", params).await;
+        let resp = post_jsonrpc(app, methods::GET_PUSH_CONFIG, params).await;
         assert!(resp.error.is_some() || resp.result.is_some());
     }
 
@@ -398,7 +413,7 @@ mod tests {
         let params = serde_json::json!({
             "taskId": "t1"
         });
-        let resp = post_jsonrpc(app, "tasks.pushNotificationConfig.list", params).await;
+        let resp = post_jsonrpc(app, methods::LIST_PUSH_CONFIGS, params).await;
         assert!(resp.error.is_some() || resp.result.is_some());
     }
 
@@ -409,7 +424,7 @@ mod tests {
             "taskId": "t1",
             "id": "cfg1"
         });
-        let resp = post_jsonrpc(app, "tasks.pushNotificationConfig.delete", params).await;
+        let resp = post_jsonrpc(app, methods::DELETE_PUSH_CONFIG, params).await;
         assert!(resp.error.is_some() || resp.result.is_some());
     }
 
@@ -417,7 +432,7 @@ mod tests {
     async fn test_get_extended_agent_card() {
         let app = make_app();
         let params = serde_json::json!({});
-        let resp = post_jsonrpc(app, "agent.extendedCard.get", params).await;
+        let resp = post_jsonrpc(app, methods::GET_EXTENDED_AGENT_CARD, params).await;
         // DefaultRequestHandler returns NotSupported
         assert!(resp.error.is_some() || resp.result.is_some());
     }
@@ -432,7 +447,11 @@ mod tests {
                 "parts": [{"text": "hello"}]
             }
         });
-        let rpc = JsonRpcRequest::new(JsonRpcId::Number(1), "message.stream", Some(body));
+        let rpc = JsonRpcRequest::new(
+            JsonRpcId::Number(1),
+            methods::SEND_STREAMING_MESSAGE,
+            Some(body),
+        );
         let req = Request::builder()
             .uri("/")
             .method("POST")
@@ -450,7 +469,7 @@ mod tests {
         let app = make_app();
         let rpc = JsonRpcRequest::new(
             JsonRpcId::Number(1),
-            "tasks.subscribe",
+            methods::SUBSCRIBE_TO_TASK,
             Some(serde_json::json!({"id": "t1"})),
         );
         let req = Request::builder()
@@ -462,6 +481,35 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         // Subscription may fail (task not found), but routing should work
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_send_message_legacy_method_rejected() {
+        let app = make_app();
+        let body = serde_json::json!({
+            "message": {
+                "messageId": "m1",
+                "role": "ROLE_USER",
+                "parts": [{"text": "hello"}]
+            }
+        });
+        let rpc = JsonRpcRequest::new(JsonRpcId::Number(1), "message.stream", Some(body));
+        let req = Request::builder()
+            .uri("/")
+            .method("POST")
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .body(Body::from(serde_json::to_string(&rpc).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let rpc_resp: JsonRpcResponse = serde_json::from_slice(&body).unwrap();
+        assert!(
+            rpc_resp.error.is_some(),
+            "unexpected result: {:?}",
+            rpc_resp.result
+        );
+        assert_eq!(rpc_resp.error.unwrap().code, error_code::METHOD_NOT_FOUND);
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -21,6 +21,7 @@ pub struct AgentCard {
     pub capabilities: AgentCapabilities,
     pub default_input_modes: Vec<String>,
     pub default_output_modes: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_vec_null_as_default")]
     pub skills: Vec<AgentSkill>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,6 +41,14 @@ pub struct AgentCard {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signatures: Option<Vec<AgentCardSignature>>,
+}
+
+fn deserialize_vec_null_as_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 // ---------------------------------------------------------------------------
@@ -576,5 +585,58 @@ mod tests {
         let json = serde_json::to_string(&card).unwrap();
         let back: AgentCard = serde_json::from_str(&json).unwrap();
         assert_eq!(card, back);
+    }
+
+    #[test]
+    fn test_agent_card_deserializes_null_skills_as_empty() {
+        let card: AgentCard = serde_json::from_str(
+            r#"{
+                "name": "Test Agent",
+                "description": "A test agent",
+                "version": "1.0.0",
+                "supportedInterfaces": [
+                    {
+                        "url": "http://localhost:3000",
+                        "protocolBinding": "JSONRPC",
+                        "protocolVersion": "1.0"
+                    }
+                ],
+                "capabilities": {
+                    "streaming": true
+                },
+                "defaultInputModes": ["text/plain"],
+                "defaultOutputModes": ["text/plain"],
+                "skills": null
+            }"#,
+        )
+        .unwrap();
+
+        assert!(card.skills.is_empty());
+    }
+
+    #[test]
+    fn test_agent_card_deserializes_missing_skills_as_empty() {
+        let card: AgentCard = serde_json::from_str(
+            r#"{
+                "name": "Test Agent",
+                "description": "A test agent",
+                "version": "1.0.0",
+                "supportedInterfaces": [
+                    {
+                        "url": "http://localhost:3000",
+                        "protocolBinding": "JSONRPC",
+                        "protocolVersion": "1.0"
+                    }
+                ],
+                "capabilities": {
+                    "streaming": true
+                },
+                "defaultInputModes": ["text/plain"],
+                "defaultOutputModes": ["text/plain"]
+            }"#,
+        )
+        .unwrap();
+
+        assert!(card.skills.is_empty());
     }
 }
