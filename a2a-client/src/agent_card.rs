@@ -43,3 +43,59 @@ impl AgentCardResolver {
             .map_err(|e| A2AError::internal(format!("failed to parse agent card: {e}")))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn spawn_agent_card_server(body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = socket.read(&mut buffer).await;
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn test_resolve_accepts_null_skills() {
+        let server = spawn_agent_card_server(
+            r#"{
+                "name": "Test Agent",
+                "description": "A test agent",
+                "version": "1.0.0",
+                "supportedInterfaces": [
+                    {
+                        "url": "http://127.0.0.1:3000/jsonrpc",
+                        "protocolBinding": "JSONRPC",
+                        "protocolVersion": "1.0"
+                    }
+                ],
+                "capabilities": { "streaming": true },
+                "defaultInputModes": ["text/plain"],
+                "defaultOutputModes": ["text/plain"],
+                "skills": null
+            }"#,
+        )
+        .await;
+
+        let resolver = AgentCardResolver::new(None);
+        let card = resolver.resolve(&server).await.unwrap();
+
+        assert!(card.skills.is_empty());
+        assert_eq!(card.supported_interfaces[0].protocol_binding, "JSONRPC");
+    }
+}
