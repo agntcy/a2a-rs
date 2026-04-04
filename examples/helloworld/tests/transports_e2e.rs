@@ -312,6 +312,19 @@ async fn rest_transport_end_to_end() {
         .unwrap();
     assert_eq!(task.id, "task-1");
 
+    let not_found = transport
+        .get_task(
+            &ServiceParams::new(),
+            &GetTaskRequest {
+                id: "missing".to_string(),
+                history_length: None,
+                tenant: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(not_found.code, error_code::TASK_NOT_FOUND);
+
     let list = transport
         .list_tasks(
             &ServiceParams::new(),
@@ -343,6 +356,19 @@ async fn rest_transport_end_to_end() {
         .unwrap();
     assert_eq!(canceled.status.state, TaskState::Canceled);
 
+    let cancel_missing = transport
+        .cancel_task(
+            &ServiceParams::new(),
+            &CancelTaskRequest {
+                id: "missing".to_string(),
+                metadata: None,
+                tenant: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(cancel_missing.code, error_code::TASK_NOT_FOUND);
+
     let subscribed = transport
         .subscribe_to_task(
             &ServiceParams::new(),
@@ -369,6 +395,19 @@ async fn rest_transport_end_to_end() {
         .unwrap();
     assert_eq!(created.task_id, "task-1");
 
+    let created_missing = transport
+        .create_push_config(
+            &ServiceParams::new(),
+            &CreateTaskPushNotificationConfigRequest {
+                task_id: "missing".to_string(),
+                config: sample_push_config("cfg-1").config,
+                tenant: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(created_missing.code, error_code::TASK_NOT_FOUND);
+
     let fetched = transport
         .get_push_config(
             &ServiceParams::new(),
@@ -381,6 +420,19 @@ async fn rest_transport_end_to_end() {
         .await
         .unwrap();
     assert_eq!(fetched.config.id.as_deref(), Some("cfg-1"));
+
+    let fetched_missing = transport
+        .get_push_config(
+            &ServiceParams::new(),
+            &GetTaskPushNotificationConfigRequest {
+                task_id: "task-1".to_string(),
+                id: "missing".to_string(),
+                tenant: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(fetched_missing.code, error_code::TASK_NOT_FOUND);
 
     let configs = transport
         .list_push_configs(
@@ -407,6 +459,19 @@ async fn rest_transport_end_to_end() {
         )
         .await
         .unwrap();
+
+    let delete_missing = transport
+        .delete_push_config(
+            &ServiceParams::new(),
+            &DeleteTaskPushNotificationConfigRequest {
+                task_id: "task-1".to_string(),
+                id: "missing".to_string(),
+                tenant: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(delete_missing.code, error_code::TASK_NOT_FOUND);
 
     let resolver = AgentCardResolver::new(Some(Client::new()));
     let card = resolver.resolve(&base_url).await.unwrap();

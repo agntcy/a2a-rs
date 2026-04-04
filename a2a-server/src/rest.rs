@@ -9,11 +9,49 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::handler::RequestHandler;
 use crate::middleware::ServiceParams;
 use crate::sse;
+
+const REST_SEND_MESSAGE_PATH: &str = "/message:send";
+const REST_SEND_MESSAGE_LEGACY_PATH: &str = "/message/send";
+const REST_STREAM_MESSAGE_PATH: &str = "/message:stream";
+const REST_STREAM_MESSAGE_LEGACY_PATH: &str = "/message/stream";
+const REST_EXTENDED_AGENT_CARD_PATH: &str = "/extendedAgentCard";
+const REST_EXTENDED_AGENT_CARD_LEGACY_PATH: &str = "/agent-card/extended";
+const REST_PUSH_CONFIGS_PATH: &str = "/tasks/{id}/pushNotificationConfigs";
+const REST_PUSH_CONFIGS_LEGACY_PATH: &str = "/tasks/{id}/push-configs";
+const REST_PUSH_CONFIG_PATH: &str = "/tasks/{id}/pushNotificationConfigs/{config_id}";
+const REST_PUSH_CONFIG_LEGACY_PATH: &str = "/tasks/{id}/push-configs/{config_id}";
+const REST_ERROR_INFO_TYPE_URL: &str = "type.googleapis.com/google.rpc.ErrorInfo";
+const REST_ERROR_DOMAIN: &str = "a2a-protocol.org";
+
+#[derive(Serialize)]
+struct RestErrorEnvelope {
+    error: RestErrorStatus,
+}
+
+#[derive(Serialize)]
+struct RestErrorStatus {
+    code: u16,
+    status: &'static str,
+    message: String,
+    details: Vec<Value>,
+}
+
+#[derive(Serialize)]
+struct RestErrorInfo {
+    #[serde(rename = "@type")]
+    type_url: &'static str,
+    reason: &'static str,
+    domain: &'static str,
+    metadata: HashMap<String, String>,
+}
 
 /// Shared state for REST handlers.
 pub struct RestState<H: RequestHandler> {
@@ -33,33 +71,58 @@ pub fn rest_router<H: RequestHandler>(handler: Arc<H>) -> axum::Router {
     let state = RestState { handler };
     axum::Router::new()
         .route(
-            "/message/send",
+            REST_SEND_MESSAGE_PATH,
             axum::routing::post(handle_send_message::<H>),
         )
         .route(
-            "/message/stream",
+            REST_SEND_MESSAGE_LEGACY_PATH,
+            axum::routing::post(handle_send_message::<H>),
+        )
+        .route(
+            REST_STREAM_MESSAGE_PATH,
             axum::routing::post(handle_stream_message::<H>),
         )
-        .route("/tasks/{id}", axum::routing::get(handle_get_task::<H>))
+        .route(
+            REST_STREAM_MESSAGE_LEGACY_PATH,
+            axum::routing::post(handle_stream_message::<H>),
+        )
+        .route(
+            "/tasks/{id}",
+            axum::routing::get(handle_get_task_or_subscribe::<H>)
+                .post(handle_post_task_action::<H>),
+        )
         .route("/tasks", axum::routing::get(handle_list_tasks::<H>))
         .route(
             "/tasks/{id}/cancel",
-            axum::routing::post(handle_cancel_task::<H>),
+            axum::routing::post(handle_cancel_task_legacy::<H>),
         )
         .route(
             "/tasks/{id}/subscribe",
-            axum::routing::post(handle_subscribe_to_task::<H>),
+            axum::routing::get(handle_subscribe_to_task_legacy::<H>)
+                .post(handle_subscribe_to_task_legacy::<H>),
         )
         .route(
-            "/tasks/{id}/push-configs",
+            REST_PUSH_CONFIGS_PATH,
             axum::routing::post(handle_create_push_config::<H>).get(handle_list_push_configs::<H>),
         )
         .route(
-            "/tasks/{id}/push-configs/{config_id}",
+            REST_PUSH_CONFIGS_LEGACY_PATH,
+            axum::routing::post(handle_create_push_config::<H>).get(handle_list_push_configs::<H>),
+        )
+        .route(
+            REST_PUSH_CONFIG_PATH,
             axum::routing::get(handle_get_push_config::<H>).delete(handle_delete_push_config::<H>),
         )
         .route(
-            "/agent-card/extended",
+            REST_PUSH_CONFIG_LEGACY_PATH,
+            axum::routing::get(handle_get_push_config::<H>).delete(handle_delete_push_config::<H>),
+        )
+        .route(
+            REST_EXTENDED_AGENT_CARD_PATH,
+            axum::routing::get(handle_get_extended_agent_card::<H>),
+        )
+        .route(
+            REST_EXTENDED_AGENT_CARD_LEGACY_PATH,
             axum::routing::get(handle_get_extended_agent_card::<H>),
         )
         .with_state(state)
@@ -93,11 +156,11 @@ pub struct GetTaskQuery {
     pub history_length: Option<i32>,
 }
 
-async fn handle_get_task<H: RequestHandler>(
-    State(state): State<RestState<H>>,
-    Path(id): Path<String>,
-    Query(query): Query<GetTaskQuery>,
-) -> impl IntoResponse {
+async fn handle_get_task_inner<H: RequestHandler>(
+    state: RestState<H>,
+    id: String,
+    query: GetTaskQuery,
+) -> axum::response::Response {
     let params = ServiceParams::new();
     let req = GetTaskRequest {
         id,
@@ -108,6 +171,18 @@ async fn handle_get_task<H: RequestHandler>(
         Ok(task) => Json(task).into_response(),
         Err(e) => rest_error_response(e),
     }
+}
+
+async fn handle_get_task_or_subscribe<H: RequestHandler>(
+    State(state): State<RestState<H>>,
+    Path(id): Path<String>,
+    Query(query): Query<GetTaskQuery>,
+) -> impl IntoResponse {
+    if let Some(task_id) = id.strip_suffix(":subscribe") {
+        return handle_subscribe_to_task_inner(state, task_id.to_string()).await;
+    }
+
+    handle_get_task_inner(state, id, query).await
 }
 
 #[derive(Deserialize)]
@@ -122,6 +197,12 @@ pub struct ListTasksQuery {
     pub page_token: Option<String>,
     #[serde(default, rename = "historyLength")]
     pub history_length: Option<i32>,
+
+    #[serde(default, rename = "statusTimestampAfter")]
+    pub status_timestamp_after: Option<DateTime<Utc>>,
+
+    #[serde(default, rename = "includeArtifacts")]
+    pub include_artifacts: Option<bool>,
 }
 
 async fn handle_list_tasks<H: RequestHandler>(
@@ -138,8 +219,8 @@ async fn handle_list_tasks<H: RequestHandler>(
         page_size: query.page_size,
         page_token: query.page_token,
         history_length: query.history_length,
-        status_timestamp_after: None,
-        include_artifacts: None,
+        status_timestamp_after: query.status_timestamp_after,
+        include_artifacts: query.include_artifacts,
         tenant: None,
     };
     match state.handler.list_tasks(&params, req).await {
@@ -148,10 +229,10 @@ async fn handle_list_tasks<H: RequestHandler>(
     }
 }
 
-async fn handle_cancel_task<H: RequestHandler>(
-    State(state): State<RestState<H>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+async fn handle_cancel_task_inner<H: RequestHandler>(
+    state: RestState<H>,
+    id: String,
+) -> axum::response::Response {
     let params = ServiceParams::new();
     let req = CancelTaskRequest {
         id,
@@ -164,16 +245,53 @@ async fn handle_cancel_task<H: RequestHandler>(
     }
 }
 
-async fn handle_subscribe_to_task<H: RequestHandler>(
+async fn handle_post_task_action<H: RequestHandler>(
     State(state): State<RestState<H>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(task_id) = id.strip_suffix(":cancel") {
+        return handle_cancel_task_inner(state, task_id.to_string()).await;
+    }
+    if let Some(task_id) = id.strip_suffix(":subscribe") {
+        return handle_subscribe_to_task_inner(state, task_id.to_string()).await;
+    }
+
+    rest_error_response(A2AError::invalid_request("unsupported task action"))
+}
+
+async fn handle_cancel_task_legacy<H: RequestHandler>(
+    State(state): State<RestState<H>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    handle_cancel_task_inner(state, id).await
+}
+
+async fn handle_subscribe_to_task_inner<H: RequestHandler>(
+    state: RestState<H>,
+    id: String,
+) -> axum::response::Response {
     let params = ServiceParams::new();
     let req = SubscribeToTaskRequest { id, tenant: None };
     match state.handler.subscribe_to_task(&params, req).await {
         Ok(stream) => sse::sse_from_stream(stream).into_response(),
         Err(e) => rest_error_response(e),
     }
+}
+
+async fn handle_subscribe_to_task_legacy<H: RequestHandler>(
+    State(state): State<RestState<H>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    handle_subscribe_to_task_inner(state, id).await
+}
+
+#[derive(Deserialize)]
+pub struct ListPushConfigsQuery {
+    #[serde(default, rename = "pageSize")]
+    pub page_size: Option<i32>,
+
+    #[serde(default, rename = "pageToken")]
+    pub page_token: Option<String>,
 }
 
 async fn handle_create_push_config<H: RequestHandler>(
@@ -212,12 +330,13 @@ async fn handle_get_push_config<H: RequestHandler>(
 async fn handle_list_push_configs<H: RequestHandler>(
     State(state): State<RestState<H>>,
     Path(id): Path<String>,
+    Query(query): Query<ListPushConfigsQuery>,
 ) -> impl IntoResponse {
     let params = ServiceParams::new();
     let req = ListTaskPushNotificationConfigsRequest {
         task_id: id,
-        page_size: None,
-        page_token: None,
+        page_size: query.page_size,
+        page_token: query.page_token,
         tenant: None,
     };
     match state.handler.list_push_configs(&params, req).await {
@@ -254,18 +373,84 @@ async fn handle_get_extended_agent_card<H: RequestHandler>(
 }
 
 fn rest_error_response(err: A2AError) -> axum::response::Response {
-    let status = err.http_status_code();
-    let body = serde_json::json!({
-        "error": {
-            "code": err.code,
-            "message": err.message,
+    let status =
+        StatusCode::from_u16(err.http_status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let reason = rest_error_reason(err.code);
+    let grpc_status = rest_grpc_status(err.code);
+
+    let mut metadata = HashMap::from([("timestamp".to_string(), Utc::now().to_rfc3339())]);
+    let mut extra_details = serde_json::Map::new();
+
+    if let Some(details) = err.details {
+        for (key, value) in details {
+            if let Some(as_string) = value.as_str() {
+                metadata.insert(key, as_string.to_string());
+            } else {
+                extra_details.insert(key, value);
+            }
         }
-    });
-    (
-        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-        Json(body),
-    )
-        .into_response()
+    }
+
+    let mut details = vec![
+        serde_json::to_value(RestErrorInfo {
+            type_url: REST_ERROR_INFO_TYPE_URL,
+            reason,
+            domain: REST_ERROR_DOMAIN,
+            metadata,
+        })
+        .expect("rest error info should serialize"),
+    ];
+
+    if !extra_details.is_empty() {
+        details.push(Value::Object(extra_details));
+    }
+
+    let body = RestErrorEnvelope {
+        error: RestErrorStatus {
+            code: status.as_u16(),
+            status: grpc_status,
+            message: err.message,
+            details,
+        },
+    };
+
+    (status, Json(body)).into_response()
+}
+
+fn rest_error_reason(code: i32) -> &'static str {
+    match code {
+        error_code::TASK_NOT_FOUND => "TASK_NOT_FOUND",
+        error_code::TASK_NOT_CANCELABLE => "TASK_NOT_CANCELABLE",
+        error_code::PUSH_NOTIFICATION_NOT_SUPPORTED => "PUSH_NOTIFICATION_NOT_SUPPORTED",
+        error_code::UNSUPPORTED_OPERATION => "UNSUPPORTED_OPERATION",
+        error_code::CONTENT_TYPE_NOT_SUPPORTED => "UNSUPPORTED_CONTENT_TYPE",
+        error_code::INVALID_AGENT_RESPONSE => "INVALID_AGENT_RESPONSE",
+        error_code::EXTENDED_CARD_NOT_CONFIGURED => "EXTENDED_AGENT_CARD_NOT_CONFIGURED",
+        error_code::EXTENSION_SUPPORT_REQUIRED => "EXTENSION_SUPPORT_REQUIRED",
+        error_code::VERSION_NOT_SUPPORTED => "VERSION_NOT_SUPPORTED",
+        error_code::PARSE_ERROR => "PARSE_ERROR",
+        error_code::INVALID_REQUEST => "INVALID_REQUEST",
+        error_code::METHOD_NOT_FOUND => "METHOD_NOT_FOUND",
+        error_code::INVALID_PARAMS => "INVALID_PARAMS",
+        _ => "INTERNAL_ERROR",
+    }
+}
+
+fn rest_grpc_status(code: i32) -> &'static str {
+    match code {
+        error_code::TASK_NOT_FOUND | error_code::METHOD_NOT_FOUND => "NOT_FOUND",
+        error_code::TASK_NOT_CANCELABLE
+        | error_code::EXTENDED_CARD_NOT_CONFIGURED
+        | error_code::EXTENSION_SUPPORT_REQUIRED => "FAILED_PRECONDITION",
+        error_code::PUSH_NOTIFICATION_NOT_SUPPORTED
+        | error_code::UNSUPPORTED_OPERATION
+        | error_code::VERSION_NOT_SUPPORTED => "UNIMPLEMENTED",
+        error_code::CONTENT_TYPE_NOT_SUPPORTED
+        | error_code::PARSE_ERROR
+        | error_code::INVALID_REQUEST
+        | error_code::INVALID_PARAMS => "INVALID_ARGUMENT",
+        _ => "INTERNAL",
+    }
 }
 
 #[cfg(test)]
@@ -345,7 +530,27 @@ mod tests {
             }
         });
         let req = Request::builder()
-            .uri("/message/send")
+            .uri(REST_SEND_MESSAGE_PATH)
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_send_message_legacy_alias() {
+        let app = make_app();
+        let body = serde_json::json!({
+            "message": {
+                "messageId": "m1",
+                "role": "ROLE_USER",
+                "parts": [{"text": "hello"}]
+            }
+        });
+        let req = Request::builder()
+            .uri(REST_SEND_MESSAGE_LEGACY_PATH)
             .method("POST")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -385,7 +590,7 @@ mod tests {
     async fn test_cancel_task_not_found() {
         let app = make_app();
         let req = Request::builder()
-            .uri("/tasks/nonexistent/cancel")
+            .uri("/tasks/nonexistent:cancel")
             .method("POST")
             .header("content-type", "application/json")
             .body(Body::empty())
@@ -401,7 +606,7 @@ mod tests {
             "url": "http://example.com/callback"
         });
         let req = Request::builder()
-            .uri("/tasks/t1/push-configs")
+            .uri("/tasks/t1/pushNotificationConfigs")
             .method("POST")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -414,7 +619,7 @@ mod tests {
     async fn test_get_extended_agent_card() {
         let app = make_app();
         let req = Request::builder()
-            .uri("/agent-card/extended")
+            .uri(REST_EXTENDED_AGENT_CARD_PATH)
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -427,6 +632,12 @@ mod tests {
         let resp = rest_error_response(A2AError::task_not_found("t1"));
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"]["code"], 404);
+        assert_eq!(payload["error"]["status"], "NOT_FOUND");
+        assert_eq!(payload["error"]["details"][0]["reason"], "TASK_NOT_FOUND");
+
         let resp = rest_error_response(A2AError::internal("boom"));
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -438,8 +649,8 @@ mod tests {
     async fn test_subscribe_to_task_not_found() {
         let app = make_app();
         let req = Request::builder()
-            .uri("/tasks/nonexistent/subscribe")
-            .method("POST")
+            .uri("/tasks/nonexistent:subscribe")
+            .method("GET")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -457,7 +668,7 @@ mod tests {
             }
         });
         let req = Request::builder()
-            .uri("/message/stream")
+            .uri(REST_STREAM_MESSAGE_PATH)
             .method("POST")
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
@@ -471,7 +682,7 @@ mod tests {
     async fn test_get_push_config_not_found() {
         let app = make_app();
         let req = Request::builder()
-            .uri("/tasks/t1/push-configs/cfg1")
+            .uri("/tasks/t1/pushNotificationConfigs/cfg1")
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -484,7 +695,7 @@ mod tests {
     async fn test_list_push_configs() {
         let app = make_app();
         let req = Request::builder()
-            .uri("/tasks/t1/push-configs")
+            .uri("/tasks/t1/pushNotificationConfigs")
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -496,7 +707,7 @@ mod tests {
     async fn test_delete_push_config() {
         let app = make_app();
         let req = Request::builder()
-            .uri("/tasks/t1/push-configs/cfg1")
+            .uri("/tasks/t1/pushNotificationConfigs/cfg1")
             .method("DELETE")
             .body(Body::empty())
             .unwrap();
@@ -508,7 +719,7 @@ mod tests {
     async fn test_list_tasks_with_query_params() {
         let app = make_app();
         let req = Request::builder()
-            .uri("/tasks?contextId=c1&pageSize=5&pageToken=tok&historyLength=3")
+            .uri("/tasks?contextId=c1&pageSize=5&pageToken=tok&historyLength=3&includeArtifacts=true&statusTimestampAfter=2025-01-01T00:00:00Z")
             .method("GET")
             .body(Body::empty())
             .unwrap();
@@ -529,7 +740,7 @@ mod tests {
             }
         });
         let req = Request::builder()
-            .uri("/message/send")
+            .uri(REST_SEND_MESSAGE_PATH)
             .method("POST")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&body).unwrap()))

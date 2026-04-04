@@ -4,8 +4,41 @@ use a2a::*;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use reqwest::Client;
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::transport::{ServiceParams, Transport, TransportFactory};
+
+const REST_SEND_MESSAGE_PATH: &str = "/message:send";
+const REST_STREAM_MESSAGE_PATH: &str = "/message:stream";
+const REST_EXTENDED_AGENT_CARD_PATH: &str = "/extendedAgentCard";
+const REST_ERROR_INFO_TYPE_URL: &str = "type.googleapis.com/google.rpc.ErrorInfo";
+const REST_ERROR_DOMAIN: &str = "a2a-protocol.org";
+
+#[derive(Debug, Deserialize)]
+struct RestErrorEnvelope {
+    error: RestErrorStatus,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestErrorStatus {
+    message: String,
+
+    #[serde(default)]
+    details: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestErrorInfo {
+    #[serde(rename = "@type")]
+    type_url: String,
+    reason: String,
+    domain: String,
+
+    #[serde(default)]
+    metadata: HashMap<String, String>,
+}
 
 /// REST (HTTP+JSON) transport implementation.
 ///
@@ -37,6 +70,34 @@ impl RestTransport {
         builder
     }
 
+    fn build_request_with_query(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        params: &ServiceParams,
+        query: &[(String, String)],
+    ) -> reqwest::RequestBuilder {
+        let builder = self.build_request(method, path, params);
+        if query.is_empty() {
+            builder
+        } else {
+            builder.query(query)
+        }
+    }
+
+    async fn send(&self, builder: reqwest::RequestBuilder) -> Result<reqwest::Response, A2AError> {
+        builder
+            .send()
+            .await
+            .map_err(|e| A2AError::internal(format!("HTTP request failed: {e}")))
+    }
+
+    async fn into_rest_error(resp: reqwest::Response) -> A2AError {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        parse_rest_error(status, &body)
+    }
+
     async fn post_json<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -44,16 +105,14 @@ impl RestTransport {
         body: &impl serde::Serialize,
     ) -> Result<T, A2AError> {
         let resp = self
-            .build_request(reqwest::Method::POST, path, params)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| A2AError::internal(format!("HTTP request failed: {e}")))?;
+            .send(
+                self.build_request(reqwest::Method::POST, path, params)
+                    .json(body),
+            )
+            .await?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(A2AError::internal(format!("HTTP {status}: {body}")));
+        if !resp.status().is_success() {
+            return Err(Self::into_rest_error(resp).await);
         }
 
         resp.json()
@@ -65,17 +124,14 @@ impl RestTransport {
         &self,
         path: &str,
         params: &ServiceParams,
+        query: &[(String, String)],
     ) -> Result<T, A2AError> {
         let resp = self
-            .build_request(reqwest::Method::GET, path, params)
-            .send()
-            .await
-            .map_err(|e| A2AError::internal(format!("HTTP request failed: {e}")))?;
+            .send(self.build_request_with_query(reqwest::Method::GET, path, params, query))
+            .await?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(A2AError::internal(format!("HTTP {status}: {body}")));
+        if !resp.status().is_success() {
+            return Err(Self::into_rest_error(resp).await);
         }
 
         resp.json()
@@ -90,12 +146,36 @@ impl RestTransport {
         body: &impl serde::Serialize,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         let resp = self
-            .build_request(reqwest::Method::POST, path, params)
-            .header("Accept", "text/event-stream")
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| A2AError::internal(format!("HTTP request failed: {e}")))?;
+            .send(
+                self.build_request(reqwest::Method::POST, path, params)
+                    .header("Accept", "text/event-stream")
+                    .json(body),
+            )
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(Self::into_rest_error(resp).await);
+        }
+
+        let stream = resp.bytes_stream();
+        Ok(crate::jsonrpc::parse_sse_stream_rest(stream))
+    }
+
+    async fn get_streaming(
+        &self,
+        path: &str,
+        params: &ServiceParams,
+    ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+        let resp = self
+            .send(
+                self.build_request(reqwest::Method::GET, path, params)
+                    .header("Accept", "text/event-stream"),
+            )
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(Self::into_rest_error(resp).await);
+        }
 
         let stream = resp.bytes_stream();
         Ok(crate::jsonrpc::parse_sse_stream_rest(stream))
@@ -103,17 +183,68 @@ impl RestTransport {
 
     async fn delete(&self, path: &str, params: &ServiceParams) -> Result<(), A2AError> {
         let resp = self
-            .build_request(reqwest::Method::DELETE, path, params)
-            .send()
-            .await
-            .map_err(|e| A2AError::internal(format!("HTTP request failed: {e}")))?;
+            .send(self.build_request(reqwest::Method::DELETE, path, params))
+            .await?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(A2AError::internal(format!("HTTP {status}: {body}")));
+        if !resp.status().is_success() {
+            return Err(Self::into_rest_error(resp).await);
         }
         Ok(())
+    }
+}
+
+fn parse_rest_error(status: reqwest::StatusCode, body: &str) -> A2AError {
+    let Ok(envelope) = serde_json::from_str::<RestErrorEnvelope>(body) else {
+        return A2AError::internal(format!("HTTP {status}: {body}"));
+    };
+
+    let mut details = HashMap::new();
+    let mut code = None;
+
+    for raw_detail in envelope.error.details {
+        if let Ok(info) = serde_json::from_value::<RestErrorInfo>(raw_detail.clone()) {
+            if info.type_url == REST_ERROR_INFO_TYPE_URL && info.domain == REST_ERROR_DOMAIN {
+                code = reason_to_error_code(&info.reason).or(code);
+                for (key, value) in info.metadata {
+                    details.insert(key, Value::String(value));
+                }
+                continue;
+            }
+        }
+
+        if let Value::Object(values) = raw_detail {
+            details.extend(values.into_iter());
+        }
+    }
+
+    A2AError {
+        code: code.unwrap_or(error_code::INTERNAL_ERROR),
+        message: envelope.error.message,
+        details: (!details.is_empty()).then_some(details),
+    }
+}
+
+fn reason_to_error_code(reason: &str) -> Option<i32> {
+    match reason {
+        "TASK_NOT_FOUND" => Some(error_code::TASK_NOT_FOUND),
+        "TASK_NOT_CANCELABLE" => Some(error_code::TASK_NOT_CANCELABLE),
+        "PUSH_NOTIFICATION_NOT_SUPPORTED" => Some(error_code::PUSH_NOTIFICATION_NOT_SUPPORTED),
+        "UNSUPPORTED_OPERATION" => Some(error_code::UNSUPPORTED_OPERATION),
+        "UNSUPPORTED_CONTENT_TYPE" | "CONTENT_TYPE_NOT_SUPPORTED" => {
+            Some(error_code::CONTENT_TYPE_NOT_SUPPORTED)
+        }
+        "INVALID_AGENT_RESPONSE" => Some(error_code::INVALID_AGENT_RESPONSE),
+        "EXTENDED_AGENT_CARD_NOT_CONFIGURED" | "EXTENDED_CARD_NOT_CONFIGURED" => {
+            Some(error_code::EXTENDED_CARD_NOT_CONFIGURED)
+        }
+        "EXTENSION_SUPPORT_REQUIRED" => Some(error_code::EXTENSION_SUPPORT_REQUIRED),
+        "VERSION_NOT_SUPPORTED" => Some(error_code::VERSION_NOT_SUPPORTED),
+        "PARSE_ERROR" => Some(error_code::PARSE_ERROR),
+        "INVALID_REQUEST" => Some(error_code::INVALID_REQUEST),
+        "METHOD_NOT_FOUND" => Some(error_code::METHOD_NOT_FOUND),
+        "INVALID_PARAMS" => Some(error_code::INVALID_PARAMS),
+        "INTERNAL_ERROR" => Some(error_code::INTERNAL_ERROR),
+        _ => None,
     }
 }
 
@@ -124,7 +255,7 @@ impl Transport for RestTransport {
         params: &ServiceParams,
         req: &SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
-        self.post_json("/message/send", params, req).await
+        self.post_json(REST_SEND_MESSAGE_PATH, params, req).await
     }
 
     async fn send_streaming_message(
@@ -132,7 +263,8 @@ impl Transport for RestTransport {
         params: &ServiceParams,
         req: &SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        self.post_streaming("/message/stream", params, req).await
+        self.post_streaming(REST_STREAM_MESSAGE_PATH, params, req)
+            .await
     }
 
     async fn get_task(
@@ -140,16 +272,12 @@ impl Transport for RestTransport {
         params: &ServiceParams,
         req: &GetTaskRequest,
     ) -> Result<Task, A2AError> {
-        let mut path = format!("/tasks/{}", req.id);
+        let path = format!("/tasks/{}", req.id);
         let mut query_parts = Vec::new();
         if let Some(hl) = req.history_length {
-            query_parts.push(format!("historyLength={hl}"));
+            query_parts.push(("historyLength".to_string(), hl.to_string()));
         }
-        if !query_parts.is_empty() {
-            path.push('?');
-            path.push_str(&query_parts.join("&"));
-        }
-        self.get_json(&path, params).await
+        self.get_json(&path, params, &query_parts).await
     }
 
     async fn list_tasks(
@@ -159,33 +287,31 @@ impl Transport for RestTransport {
     ) -> Result<ListTasksResponse, A2AError> {
         let mut query_parts = Vec::new();
         if let Some(ref cid) = req.context_id {
-            query_parts.push(format!("contextId={cid}"));
+            query_parts.push(("contextId".to_string(), cid.clone()));
         }
         if let Some(ref status) = req.status {
             let s = serde_json::to_value(status)
                 .ok()
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_default();
-            query_parts.push(format!("status={s}"));
+            query_parts.push(("status".to_string(), s));
         }
         if let Some(ps) = req.page_size {
-            query_parts.push(format!("pageSize={ps}"));
+            query_parts.push(("pageSize".to_string(), ps.to_string()));
         }
         if let Some(ref pt) = req.page_token {
-            query_parts.push(format!("pageToken={pt}"));
+            query_parts.push(("pageToken".to_string(), pt.clone()));
         }
         if let Some(hl) = req.history_length {
-            query_parts.push(format!("historyLength={hl}"));
+            query_parts.push(("historyLength".to_string(), hl.to_string()));
+        }
+        if let Some(ref ts) = req.status_timestamp_after {
+            query_parts.push(("statusTimestampAfter".to_string(), ts.to_rfc3339()));
         }
         if let Some(ia) = req.include_artifacts {
-            query_parts.push(format!("includeArtifacts={ia}"));
+            query_parts.push(("includeArtifacts".to_string(), ia.to_string()));
         }
-        let mut path = "/tasks".to_string();
-        if !query_parts.is_empty() {
-            path.push('?');
-            path.push_str(&query_parts.join("&"));
-        }
-        self.get_json(&path, params).await
+        self.get_json("/tasks", params, &query_parts).await
     }
 
     async fn cancel_task(
@@ -193,7 +319,7 @@ impl Transport for RestTransport {
         params: &ServiceParams,
         req: &CancelTaskRequest,
     ) -> Result<Task, A2AError> {
-        self.post_json(&format!("/tasks/{}/cancel", req.id), params, req)
+        self.post_json(&format!("/tasks/{}:cancel", req.id), params, req)
             .await
     }
 
@@ -202,7 +328,7 @@ impl Transport for RestTransport {
         params: &ServiceParams,
         req: &SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        self.post_streaming(&format!("/tasks/{}/subscribe", req.id), params, req)
+        self.get_streaming(&format!("/tasks/{}:subscribe", req.id), params)
             .await
     }
 
@@ -212,7 +338,7 @@ impl Transport for RestTransport {
         req: &CreateTaskPushNotificationConfigRequest,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         self.post_json(
-            &format!("/tasks/{}/push-configs", req.task_id),
+            &format!("/tasks/{}/pushNotificationConfigs", req.task_id),
             params,
             &req.config,
         )
@@ -225,8 +351,9 @@ impl Transport for RestTransport {
         req: &GetTaskPushNotificationConfigRequest,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         self.get_json(
-            &format!("/tasks/{}/push-configs/{}", req.task_id, req.id),
+            &format!("/tasks/{}/pushNotificationConfigs/{}", req.task_id, req.id),
             params,
+            &[],
         )
         .await
     }
@@ -236,8 +363,20 @@ impl Transport for RestTransport {
         params: &ServiceParams,
         req: &ListTaskPushNotificationConfigsRequest,
     ) -> Result<ListTaskPushNotificationConfigsResponse, A2AError> {
-        self.get_json(&format!("/tasks/{}/push-configs", req.task_id), params)
-            .await
+        let mut query_parts = Vec::new();
+        if let Some(page_size) = req.page_size {
+            query_parts.push(("pageSize".to_string(), page_size.to_string()));
+        }
+        if let Some(ref page_token) = req.page_token {
+            query_parts.push(("pageToken".to_string(), page_token.clone()));
+        }
+
+        self.get_json(
+            &format!("/tasks/{}/pushNotificationConfigs", req.task_id),
+            params,
+            &query_parts,
+        )
+        .await
     }
 
     async fn delete_push_config(
@@ -246,7 +385,7 @@ impl Transport for RestTransport {
         req: &DeleteTaskPushNotificationConfigRequest,
     ) -> Result<(), A2AError> {
         self.delete(
-            &format!("/tasks/{}/push-configs/{}", req.task_id, req.id),
+            &format!("/tasks/{}/pushNotificationConfigs/{}", req.task_id, req.id),
             params,
         )
         .await
@@ -257,7 +396,8 @@ impl Transport for RestTransport {
         params: &ServiceParams,
         _req: &GetExtendedAgentCardRequest,
     ) -> Result<AgentCard, A2AError> {
-        self.get_json("/agent-card/extended", params).await
+        self.get_json(REST_EXTENDED_AGENT_CARD_PATH, params, &[])
+            .await
     }
 
     async fn destroy(&self) -> Result<(), A2AError> {
@@ -299,6 +439,7 @@ impl TransportFactory for RestTransportFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_rest_transport_new_strips_trailing_slash() {
@@ -356,5 +497,61 @@ mod tests {
             .map(|v| v.to_str().unwrap().to_string())
             .collect();
         assert_eq!(vals, vec!["val1", "val2"]);
+    }
+
+    #[test]
+    fn test_parse_rest_error_preserves_a2a_error_code() {
+        let body = json!({
+            "error": {
+                "code": 404,
+                "status": "NOT_FOUND",
+                "message": "task not found: t1",
+                "details": [
+                    {
+                        "@type": REST_ERROR_INFO_TYPE_URL,
+                        "reason": "TASK_NOT_FOUND",
+                        "domain": REST_ERROR_DOMAIN,
+                        "metadata": {
+                            "taskId": "t1"
+                        }
+                    },
+                    {
+                        "resource": "task"
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        let err = parse_rest_error(reqwest::StatusCode::NOT_FOUND, &body);
+
+        assert_eq!(err.code, error_code::TASK_NOT_FOUND);
+        assert_eq!(err.message, "task not found: t1");
+        let details = err.details.expect("expected structured details");
+        assert_eq!(details.get("taskId"), Some(&Value::String("t1".into())));
+        assert_eq!(details.get("resource"), Some(&Value::String("task".into())));
+    }
+
+    #[test]
+    fn test_parse_rest_error_accepts_go_reason_aliases() {
+        let body = json!({
+            "error": {
+                "code": 400,
+                "status": "INVALID_ARGUMENT",
+                "message": "incompatible content types",
+                "details": [
+                    {
+                        "@type": REST_ERROR_INFO_TYPE_URL,
+                        "reason": "UNSUPPORTED_CONTENT_TYPE",
+                        "domain": REST_ERROR_DOMAIN,
+                        "metadata": {}
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        let err = parse_rest_error(reqwest::StatusCode::BAD_REQUEST, &body);
+        assert_eq!(err.code, error_code::CONTENT_TYPE_NOT_SUPPORTED);
     }
 }
