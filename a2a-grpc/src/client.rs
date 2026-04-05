@@ -8,8 +8,7 @@ use a2a_pb::proto::a2a_service_client::A2aServiceClient;
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use tokio::sync::Mutex;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 
 use crate::errors::status_to_a2a_error;
 
@@ -18,7 +17,7 @@ use crate::errors::status_to_a2a_error;
 /// Converts native A2A types to proto types via `a2a_pb::pbconv`,
 /// calls the gRPC service, and converts responses back.
 pub struct GrpcTransport {
-    client: Mutex<A2aServiceClient<Channel>>,
+    channel: Channel,
 }
 
 fn normalize_grpc_endpoint(endpoint: &str) -> String {
@@ -32,18 +31,20 @@ fn normalize_grpc_endpoint(endpoint: &str) -> String {
 impl GrpcTransport {
     pub async fn connect(endpoint: impl Into<String>) -> Result<Self, A2AError> {
         let endpoint_str = normalize_grpc_endpoint(&endpoint.into());
-        let client = A2aServiceClient::connect(endpoint_str)
+        let channel = Endpoint::from_shared(endpoint_str)
+            .map_err(|e| A2AError::internal(format!("gRPC endpoint error: {e}")))?
+            .connect()
             .await
             .map_err(|e| A2AError::internal(format!("gRPC connect error: {e}")))?;
-        Ok(GrpcTransport {
-            client: Mutex::new(client),
-        })
+        Ok(GrpcTransport { channel })
     }
 
     pub fn from_channel(channel: Channel) -> Self {
-        GrpcTransport {
-            client: Mutex::new(A2aServiceClient::new(channel)),
-        }
+        GrpcTransport { channel }
+    }
+
+    fn client(&self) -> A2aServiceClient<Channel> {
+        A2aServiceClient::new(self.channel.clone())
     }
 }
 
@@ -78,10 +79,8 @@ impl Transport for GrpcTransport {
     ) -> Result<SendMessageResponse, A2AError> {
         let proto_req = pbconv::to_proto_send_message_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .send_message(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -96,10 +95,8 @@ impl Transport for GrpcTransport {
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         let proto_req = pbconv::to_proto_send_message_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .send_streaming_message(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -118,10 +115,8 @@ impl Transport for GrpcTransport {
     ) -> Result<Task, A2AError> {
         let proto_req = pbconv::to_proto_get_task_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .get_task(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -135,10 +130,8 @@ impl Transport for GrpcTransport {
     ) -> Result<ListTasksResponse, A2AError> {
         let proto_req = pbconv::to_proto_list_tasks_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .list_tasks(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -152,10 +145,8 @@ impl Transport for GrpcTransport {
     ) -> Result<Task, A2AError> {
         let proto_req = pbconv::to_proto_cancel_task_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .cancel_task(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -169,10 +160,8 @@ impl Transport for GrpcTransport {
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
         let proto_req = pbconv::to_proto_subscribe_to_task_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .subscribe_to_task(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -191,10 +180,8 @@ impl Transport for GrpcTransport {
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         let proto_req = pbconv::to_proto_create_task_push_notification_config_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .create_task_push_notification_config(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -210,10 +197,8 @@ impl Transport for GrpcTransport {
     ) -> Result<TaskPushNotificationConfig, A2AError> {
         let proto_req = pbconv::to_proto_get_task_push_notification_config_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .get_task_push_notification_config(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -229,10 +214,8 @@ impl Transport for GrpcTransport {
     ) -> Result<ListTaskPushNotificationConfigsResponse, A2AError> {
         let proto_req = pbconv::to_proto_list_task_push_notification_configs_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .list_task_push_notification_configs(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -246,9 +229,8 @@ impl Transport for GrpcTransport {
     ) -> Result<(), A2AError> {
         let proto_req = pbconv::to_proto_delete_task_push_notification_config_request(req);
         let grpc_req = make_request(params, proto_req);
-        self.client
-            .lock()
-            .await
+        let mut client = self.client();
+        client
             .delete_task_push_notification_config(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
@@ -262,10 +244,8 @@ impl Transport for GrpcTransport {
     ) -> Result<AgentCard, A2AError> {
         let proto_req = pbconv::to_proto_get_extended_agent_card_request(req);
         let grpc_req = make_request(params, proto_req);
-        let response = self
-            .client
-            .lock()
-            .await
+        let mut client = self.client();
+        let response = client
             .get_extended_agent_card(grpc_req)
             .await
             .map_err(|s| status_to_a2a_error(&s))?;
