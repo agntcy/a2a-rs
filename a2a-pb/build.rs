@@ -130,11 +130,7 @@ fn patch_generated_protojson_serde(out_dir: &Path) -> Result<(), Box<dyn std::er
     let serde_path = out_dir.join("lf.a2a.v1.serde.rs");
     let mut generated = std::fs::read_to_string(&serde_path)?;
 
-    generated = replace_if_present(
-        generated,
-        NULL_MAP_REPLACEMENT.0,
-        NULL_MAP_REPLACEMENT.1,
-    );
+    generated = replace_if_present(generated, NULL_MAP_REPLACEMENT.0, NULL_MAP_REPLACEMENT.1);
 
     for &(from, to) in NULL_REPEATED_FIELD_REPLACEMENTS {
         generated = replace_if_present(generated, from, to);

@@ -2,8 +2,8 @@ use std::fmt;
 
 use a2a::{
     AgentCard, CancelTaskRequest, CreateTaskPushNotificationConfigRequest,
-    DeleteTaskPushNotificationConfigRequest, GetExtendedAgentCardRequest, GetTaskRequest,
-    GetTaskPushNotificationConfigRequest, ListTaskPushNotificationConfigsRequest,
+    DeleteTaskPushNotificationConfigRequest, GetExtendedAgentCardRequest,
+    GetTaskPushNotificationConfigRequest, GetTaskRequest, ListTaskPushNotificationConfigsRequest,
     ListTaskPushNotificationConfigsResponse, ListTasksRequest, ListTasksResponse,
     PushNotificationConfig, SendMessageRequest, SendMessageResponse, StreamResponse,
     SubscribeToTaskRequest, Task, TaskPushNotificationConfig,
@@ -48,13 +48,15 @@ pub fn to_value<T: ProtoJsonPayload>(value: &T) -> Result<Value, ProtoJsonPayloa
 }
 
 pub fn from_value<T: ProtoJsonPayload>(value: Value) -> Result<T, ProtoJsonPayloadError> {
-    let protojson: T::ProtoJson = serde_json::from_value(value).map_err(ProtoJsonPayloadError::Json)?;
+    let protojson: T::ProtoJson =
+        serde_json::from_value(value).map_err(ProtoJsonPayloadError::Json)?;
     let proto: T::Proto = transcode_message(&protojson)?;
     T::try_from_proto(&proto)
 }
 
 pub fn from_str<T: ProtoJsonPayload>(value: &str) -> Result<T, ProtoJsonPayloadError> {
-    let protojson: T::ProtoJson = serde_json::from_str(value).map_err(ProtoJsonPayloadError::Json)?;
+    let protojson: T::ProtoJson =
+        serde_json::from_str(value).map_err(ProtoJsonPayloadError::Json)?;
     let proto: T::Proto = transcode_message(&protojson)?;
     T::try_from_proto(&proto)
 }
@@ -95,8 +97,7 @@ macro_rules! impl_protojson_payload_optional {
             }
 
             fn try_from_proto(value: &Self::Proto) -> Result<Self, ProtoJsonPayloadError> {
-                $from_proto(value)
-                    .ok_or(ProtoJsonPayloadError::MissingPayload(stringify!($native)))
+                $from_proto(value).ok_or(ProtoJsonPayloadError::MissingPayload(stringify!($native)))
             }
         }
     };

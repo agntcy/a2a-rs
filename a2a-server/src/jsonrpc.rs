@@ -64,32 +64,42 @@ async fn handle_unary_request<H: RequestHandler>(
     let raw_params = request.params.clone().unwrap_or(Value::Null);
 
     let result: Result<Value, A2AError> = match request.method.as_str() {
-        methods::SEND_MESSAGE => match protojson_conv::from_value::<SendMessageRequest>(raw_params) {
-            Ok(req) => state.handler.send_message(params, req).await.and_then(|r| {
-                protojson_value(&r)
-            }),
+        methods::SEND_MESSAGE => match protojson_conv::from_value::<SendMessageRequest>(raw_params)
+        {
+            Ok(req) => state
+                .handler
+                .send_message(params, req)
+                .await
+                .and_then(|r| protojson_value(&r)),
             Err(e) => Err(parse_error(e)),
         },
         methods::GET_TASK => match protojson_conv::from_value::<GetTaskRequest>(raw_params) {
-            Ok(req) => state.handler.get_task(params, req).await.and_then(|r| {
-                protojson_value(&r)
-            }),
+            Ok(req) => state
+                .handler
+                .get_task(params, req)
+                .await
+                .and_then(|r| protojson_value(&r)),
             Err(e) => Err(parse_error(e)),
         },
         methods::LIST_TASKS => match protojson_conv::from_value::<ListTasksRequest>(raw_params) {
-            Ok(req) => state.handler.list_tasks(params, req).await.and_then(|r| {
-                protojson_value(&r)
-            }),
+            Ok(req) => state
+                .handler
+                .list_tasks(params, req)
+                .await
+                .and_then(|r| protojson_value(&r)),
             Err(e) => Err(parse_error(e)),
         },
         methods::CANCEL_TASK => match protojson_conv::from_value::<CancelTaskRequest>(raw_params) {
-            Ok(req) => state.handler.cancel_task(params, req).await.and_then(|r| {
-                protojson_value(&r)
-            }),
+            Ok(req) => state
+                .handler
+                .cancel_task(params, req)
+                .await
+                .and_then(|r| protojson_value(&r)),
             Err(e) => Err(parse_error(e)),
         },
         methods::CREATE_PUSH_CONFIG => {
-            match protojson_conv::from_value::<CreateTaskPushNotificationConfigRequest>(raw_params) {
+            match protojson_conv::from_value::<CreateTaskPushNotificationConfigRequest>(raw_params)
+            {
                 Ok(req) => state
                     .handler
                     .create_push_config(params, req)
@@ -119,7 +129,8 @@ async fn handle_unary_request<H: RequestHandler>(
             }
         }
         methods::DELETE_PUSH_CONFIG => {
-            match protojson_conv::from_value::<DeleteTaskPushNotificationConfigRequest>(raw_params) {
+            match protojson_conv::from_value::<DeleteTaskPushNotificationConfigRequest>(raw_params)
+            {
                 Ok(req) => state
                     .handler
                     .delete_push_config(params, req)
@@ -163,7 +174,9 @@ async fn handle_streaming_request<H: RequestHandler>(
         methods::SEND_STREAMING_MESSAGE => {
             match protojson_conv::from_value::<SendMessageRequest>(raw_params) {
                 Ok(req) => match state.handler.send_streaming_message(params, req).await {
-                    Ok(stream) => sse::sse_jsonrpc_stream(id, protojson_stream(stream)).into_response(),
+                    Ok(stream) => {
+                        sse::sse_jsonrpc_stream(id, protojson_stream(stream)).into_response()
+                    }
                     Err(e) => error_response(id, e),
                 },
                 Err(e) => error_response(id, parse_error(e)),
@@ -172,7 +185,9 @@ async fn handle_streaming_request<H: RequestHandler>(
         methods::SUBSCRIBE_TO_TASK => {
             match protojson_conv::from_value::<SubscribeToTaskRequest>(raw_params) {
                 Ok(req) => match state.handler.subscribe_to_task(params, req).await {
-                    Ok(stream) => sse::sse_jsonrpc_stream(id, protojson_stream(stream)).into_response(),
+                    Ok(stream) => {
+                        sse::sse_jsonrpc_stream(id, protojson_stream(stream)).into_response()
+                    }
                     Err(e) => error_response(id, e),
                 },
                 Err(e) => error_response(id, parse_error(e)),
@@ -215,10 +230,10 @@ fn parse_error(e: impl std::fmt::Display) -> A2AError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use a2a_pb::protojson_conv;
     use crate::executor::ExecutorContext;
     use crate::handler::DefaultRequestHandler;
     use crate::task_store::InMemoryTaskStore;
+    use a2a_pb::protojson_conv;
     use axum::body::Body;
     use axum::http::Request;
     use futures::stream::BoxStream;
@@ -305,7 +320,8 @@ mod tests {
         });
         let resp = post_jsonrpc(app, methods::SEND_MESSAGE, params).await;
         assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-        let result = protojson_conv::from_value::<SendMessageResponse>(resp.result.unwrap()).unwrap();
+        let result =
+            protojson_conv::from_value::<SendMessageResponse>(resp.result.unwrap()).unwrap();
         assert!(matches!(result, SendMessageResponse::Task(_)));
     }
 

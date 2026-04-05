@@ -499,10 +499,10 @@ fn rest_grpc_status(code: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use a2a_pb::protojson_conv;
     use crate::executor::ExecutorContext;
     use crate::handler::DefaultRequestHandler;
     use crate::task_store::InMemoryTaskStore;
+    use a2a_pb::protojson_conv;
     use axum::body::Body;
     use axum::http::Request;
     use futures::stream::BoxStream;

@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use a2a_pb::protojson::{
-    part, stream_response, AgentCapabilities, AgentCard, AgentInterface, AgentProvider,
-    AgentSkill, Artifact, AuthenticationInfo, Message, Part, Role, SendMessageConfiguration,
-    SendMessageRequest, StreamResponse, Task, TaskPushNotificationConfig, TaskState, TaskStatus,
-    TaskStatusUpdateEvent,
+    AgentCapabilities, AgentCard, AgentInterface, AgentProvider, AgentSkill, Artifact,
+    AuthenticationInfo, Message, Part, Role, SendMessageConfiguration, SendMessageRequest,
+    StreamResponse, Task, TaskPushNotificationConfig, TaskState, TaskStatus, TaskStatusUpdateEvent,
+    part, stream_response,
 };
-use pbjson_types::{value, Struct, Timestamp, Value};
-use serde_json::{json, Value as JsonValue};
+use pbjson_types::{Struct, Timestamp, Value, value};
+use serde_json::{Value as JsonValue, json};
 
 fn string_value(value: &str) -> Value {
     Value {

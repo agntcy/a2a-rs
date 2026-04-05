@@ -33,8 +33,9 @@ impl JsonRpcTransport {
         Resp: ProtoJsonPayload,
     {
         let id = JsonRpcId::String(uuid::Uuid::now_v7().to_string());
-        let payload = protojson_conv::to_value(request_params)
-            .map_err(|e| A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}")))?;
+        let payload = protojson_conv::to_value(request_params).map_err(|e| {
+            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
+        })?;
         let rpc_request = JsonRpcRequest::new(id, method, Some(payload));
 
         let mut builder = self.client.post(&self.endpoint);
@@ -77,8 +78,9 @@ impl JsonRpcTransport {
         Req: ProtoJsonPayload,
     {
         let id = JsonRpcId::String(uuid::Uuid::now_v7().to_string());
-        let payload = protojson_conv::to_value(request_params)
-            .map_err(|e| A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}")))?;
+        let payload = protojson_conv::to_value(request_params).map_err(|e| {
+            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
+        })?;
         let rpc_request = JsonRpcRequest::new(id, method, Some(payload));
 
         let mut builder = self
@@ -346,8 +348,9 @@ impl Transport for JsonRpcTransport {
         req: &DeleteTaskPushNotificationConfigRequest,
     ) -> Result<(), A2AError> {
         let id = JsonRpcId::String(uuid::Uuid::now_v7().to_string());
-        let request_params = protojson_conv::to_value(req)
-            .map_err(|e| A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}")))?;
+        let request_params = protojson_conv::to_value(req).map_err(|e| {
+            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
+        })?;
         let rpc_request =
             JsonRpcRequest::new(id, methods::DELETE_PUSH_CONFIG, Some(request_params));
 
@@ -381,7 +384,8 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &GetExtendedAgentCardRequest,
     ) -> Result<AgentCard, A2AError> {
-        self.call(params, methods::GET_EXTENDED_AGENT_CARD, req).await
+        self.call(params, methods::GET_EXTENDED_AGENT_CARD, req)
+            .await
     }
 
     async fn destroy(&self) -> Result<(), A2AError> {
@@ -621,8 +625,13 @@ mod tests {
                 metadata: None,
             })
         };
-        let sr1 = serde_json::to_string(&protojson_conv::to_value(&make_sr(TaskState::Working)).unwrap()).unwrap();
-        let sr2 = serde_json::to_string(&protojson_conv::to_value(&make_sr(TaskState::Completed)).unwrap()).unwrap();
+        let sr1 =
+            serde_json::to_string(&protojson_conv::to_value(&make_sr(TaskState::Working)).unwrap())
+                .unwrap();
+        let sr2 = serde_json::to_string(
+            &protojson_conv::to_value(&make_sr(TaskState::Completed)).unwrap(),
+        )
+        .unwrap();
         let chunk1 = format!("data: {}\n\n", sr1);
         let chunk2 = format!("data: {}\n\n", sr2);
 
