@@ -21,9 +21,17 @@ pub struct GrpcTransport {
     client: Mutex<A2aServiceClient<Channel>>,
 }
 
+fn normalize_grpc_endpoint(endpoint: &str) -> String {
+    if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    }
+}
+
 impl GrpcTransport {
     pub async fn connect(endpoint: impl Into<String>) -> Result<Self, A2AError> {
-        let endpoint_str = endpoint.into();
+        let endpoint_str = normalize_grpc_endpoint(&endpoint.into());
         let client = A2aServiceClient::connect(endpoint_str)
             .await
             .map_err(|e| A2AError::internal(format!("gRPC connect error: {e}")))?;
@@ -291,6 +299,26 @@ impl TransportFactory for GrpcTransportFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_grpc_endpoint_adds_http_scheme() {
+        assert_eq!(
+            normalize_grpc_endpoint("127.0.0.1:50051"),
+            "http://127.0.0.1:50051"
+        );
+    }
+
+    #[test]
+    fn test_normalize_grpc_endpoint_preserves_existing_scheme() {
+        assert_eq!(
+            normalize_grpc_endpoint("http://127.0.0.1:50051"),
+            "http://127.0.0.1:50051"
+        );
+        assert_eq!(
+            normalize_grpc_endpoint("https://example.com:443"),
+            "https://example.com:443"
+        );
+    }
 
     #[test]
     fn test_service_params_to_metadata_empty() {
