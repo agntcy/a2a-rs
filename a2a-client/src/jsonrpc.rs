@@ -1,10 +1,10 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 use a2a::*;
+use a2a_pb::protojson_conv::{self, ProtoJsonPayload};
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use reqwest::Client;
-use serde_json::Value;
 
 use crate::transport::{ServiceParams, Transport, TransportFactory};
 
@@ -22,14 +22,21 @@ impl JsonRpcTransport {
         JsonRpcTransport { client, endpoint }
     }
 
-    async fn call<T: serde::de::DeserializeOwned>(
+    async fn call<Req, Resp>(
         &self,
         params: &ServiceParams,
         method: &str,
-        request_params: Value,
-    ) -> Result<T, A2AError> {
+        request_params: &Req,
+    ) -> Result<Resp, A2AError>
+    where
+        Req: ProtoJsonPayload,
+        Resp: ProtoJsonPayload,
+    {
         let id = JsonRpcId::String(uuid::Uuid::now_v7().to_string());
-        let rpc_request = JsonRpcRequest::new(id, method, Some(request_params));
+        let payload = protojson_conv::to_value(request_params).map_err(|e| {
+            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
+        })?;
+        let rpc_request = JsonRpcRequest::new(id, method, Some(payload));
 
         let mut builder = self.client.post(&self.endpoint);
         for (key, values) in params {
@@ -57,18 +64,24 @@ impl JsonRpcTransport {
             .result
             .ok_or_else(|| A2AError::internal("JSON-RPC response missing result"))?;
 
-        serde_json::from_value(result)
+        protojson_conv::from_value(result)
             .map_err(|e| A2AError::internal(format!("failed to deserialize result: {e}")))
     }
 
-    async fn call_streaming(
+    async fn call_streaming<Req>(
         &self,
         params: &ServiceParams,
         method: &str,
-        request_params: Value,
-    ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+        request_params: &Req,
+    ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError>
+    where
+        Req: ProtoJsonPayload,
+    {
         let id = JsonRpcId::String(uuid::Uuid::now_v7().to_string());
-        let rpc_request = JsonRpcRequest::new(id, method, Some(request_params));
+        let payload = protojson_conv::to_value(request_params).map_err(|e| {
+            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
+        })?;
+        let rpc_request = JsonRpcRequest::new(id, method, Some(payload));
 
         let mut builder = self
             .client
@@ -142,7 +155,7 @@ fn parse_sse_stream(
                                         ));
                                     }
                                     if let Some(result) = rpc_resp.result {
-                                        match serde_json::from_value::<StreamResponse>(result) {
+                                        match protojson_conv::from_value::<StreamResponse>(result) {
                                             Ok(sr) => return Some((Ok(sr), (stream, buf))),
                                             Err(e) => {
                                                 return Some((
@@ -157,7 +170,7 @@ fn parse_sse_stream(
                                 }
                                 Err(_) => {
                                     // Try parsing directly as StreamResponse
-                                    match serde_json::from_str::<StreamResponse>(&data) {
+                                    match protojson_conv::from_str::<StreamResponse>(&data) {
                                         Ok(sr) => return Some((Ok(sr), (stream, buf))),
                                         Err(e) => {
                                             return Some((
@@ -227,7 +240,7 @@ pub(crate) fn parse_sse_stream_rest(
                                 continue;
                             }
 
-                            match serde_json::from_str::<StreamResponse>(&data) {
+                            match protojson_conv::from_str::<StreamResponse>(&data) {
                                 Ok(sr) => return Some((Ok(sr), (stream, buf))),
                                 Err(e) => {
                                     return Some((
@@ -260,8 +273,7 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call(params, methods::SEND_MESSAGE, p).await
+        self.call(params, methods::SEND_MESSAGE, req).await
     }
 
     async fn send_streaming_message(
@@ -269,8 +281,7 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call_streaming(params, methods::SEND_STREAMING_MESSAGE, p)
+        self.call_streaming(params, methods::SEND_STREAMING_MESSAGE, req)
             .await
     }
 
@@ -279,8 +290,7 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &GetTaskRequest,
     ) -> Result<Task, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call(params, methods::GET_TASK, p).await
+        self.call(params, methods::GET_TASK, req).await
     }
 
     async fn list_tasks(
@@ -288,8 +298,7 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &ListTasksRequest,
     ) -> Result<ListTasksResponse, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call(params, methods::LIST_TASKS, p).await
+        self.call(params, methods::LIST_TASKS, req).await
     }
 
     async fn cancel_task(
@@ -297,8 +306,7 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &CancelTaskRequest,
     ) -> Result<Task, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call(params, methods::CANCEL_TASK, p).await
+        self.call(params, methods::CANCEL_TASK, req).await
     }
 
     async fn subscribe_to_task(
@@ -306,8 +314,7 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call_streaming(params, methods::SUBSCRIBE_TO_TASK, p)
+        self.call_streaming(params, methods::SUBSCRIBE_TO_TASK, req)
             .await
     }
 
@@ -316,8 +323,7 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &CreateTaskPushNotificationConfigRequest,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call(params, methods::CREATE_PUSH_CONFIG, p).await
+        self.call(params, methods::CREATE_PUSH_CONFIG, req).await
     }
 
     async fn get_push_config(
@@ -325,8 +331,7 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &GetTaskPushNotificationConfigRequest,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call(params, methods::GET_PUSH_CONFIG, p).await
+        self.call(params, methods::GET_PUSH_CONFIG, req).await
     }
 
     async fn list_push_configs(
@@ -334,8 +339,7 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &ListTaskPushNotificationConfigsRequest,
     ) -> Result<ListTaskPushNotificationConfigsResponse, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call(params, methods::LIST_PUSH_CONFIGS, p).await
+        self.call(params, methods::LIST_PUSH_CONFIGS, req).await
     }
 
     async fn delete_push_config(
@@ -344,8 +348,9 @@ impl Transport for JsonRpcTransport {
         req: &DeleteTaskPushNotificationConfigRequest,
     ) -> Result<(), A2AError> {
         let id = JsonRpcId::String(uuid::Uuid::now_v7().to_string());
-        let request_params =
-            serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
+        let request_params = protojson_conv::to_value(req).map_err(|e| {
+            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
+        })?;
         let rpc_request =
             JsonRpcRequest::new(id, methods::DELETE_PUSH_CONFIG, Some(request_params));
 
@@ -379,8 +384,8 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &GetExtendedAgentCardRequest,
     ) -> Result<AgentCard, A2AError> {
-        let p = serde_json::to_value(req).map_err(|e| A2AError::internal(e.to_string()))?;
-        self.call(params, methods::GET_EXTENDED_AGENT_CARD, p).await
+        self.call(params, methods::GET_EXTENDED_AGENT_CARD, req)
+            .await
     }
 
     async fn destroy(&self) -> Result<(), A2AError> {
@@ -422,6 +427,7 @@ impl TransportFactory for JsonRpcTransportFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a2a_pb::protojson_conv;
     use futures::StreamExt;
 
     /// Helper: build an SSE byte stream from raw text chunks.
@@ -450,7 +456,7 @@ mod tests {
             metadata: None,
         };
         let sr = StreamResponse::StatusUpdate(status_update);
-        let result_val = serde_json::to_value(&sr).unwrap();
+        let result_val = protojson_conv::to_value(&sr).unwrap();
         let rpc_resp = JsonRpcResponse::success(JsonRpcId::Number(1), result_val);
         let data = serde_json::to_string(&rpc_resp).unwrap();
         let sse_text = format!("data: {}\n\n", data);
@@ -495,7 +501,7 @@ mod tests {
             metadata: None,
         };
         let sr = StreamResponse::StatusUpdate(status_update);
-        let data = serde_json::to_string(&sr).unwrap();
+        let data = serde_json::to_string(&protojson_conv::to_value(&sr).unwrap()).unwrap();
         let sse_text = format!("data: {}\n\n", data);
 
         let stream = byte_stream(vec![sse_text]);
@@ -517,7 +523,7 @@ mod tests {
             metadata: None,
         };
         let sr = StreamResponse::StatusUpdate(status_update);
-        let data = serde_json::to_string(&sr).unwrap();
+        let data = serde_json::to_string(&protojson_conv::to_value(&sr).unwrap()).unwrap();
         let sse_text = format!("data: {}\n\n", data);
 
         let stream = byte_stream(vec![sse_text]);
@@ -548,7 +554,7 @@ mod tests {
             },
             metadata: None,
         });
-        let data = serde_json::to_string(&sr).unwrap();
+        let data = serde_json::to_string(&protojson_conv::to_value(&sr).unwrap()).unwrap();
         // First event has no data, second has data
         let sse_text = format!("event: ping\n\ndata: {}\n\n", data);
 
@@ -571,7 +577,7 @@ mod tests {
             },
             metadata: None,
         });
-        let data = serde_json::to_string(&sr).unwrap();
+        let data = serde_json::to_string(&protojson_conv::to_value(&sr).unwrap()).unwrap();
         let full = format!("data: {}\n\n", data);
         let mid = full.len() / 2;
         let chunk1 = full[..mid].to_string();
@@ -596,7 +602,7 @@ mod tests {
             },
             metadata: None,
         });
-        let data = serde_json::to_string(&sr).unwrap();
+        let data = serde_json::to_string(&protojson_conv::to_value(&sr).unwrap()).unwrap();
         let sse_text = format!("data:{}\n\n", data);
 
         let stream = byte_stream(vec![sse_text]);
@@ -619,8 +625,13 @@ mod tests {
                 metadata: None,
             })
         };
-        let sr1 = serde_json::to_string(&make_sr(TaskState::Working)).unwrap();
-        let sr2 = serde_json::to_string(&make_sr(TaskState::Completed)).unwrap();
+        let sr1 =
+            serde_json::to_string(&protojson_conv::to_value(&make_sr(TaskState::Working)).unwrap())
+                .unwrap();
+        let sr2 = serde_json::to_string(
+            &protojson_conv::to_value(&make_sr(TaskState::Completed)).unwrap(),
+        )
+        .unwrap();
         let chunk1 = format!("data: {}\n\n", sr1);
         let chunk2 = format!("data: {}\n\n", sr2);
 

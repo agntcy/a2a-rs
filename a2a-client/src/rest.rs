@@ -1,6 +1,7 @@
 // Copyright AGNTCY Contributors (https://github.com/agntcy)
 // SPDX-License-Identifier: Apache-2.0
 use a2a::*;
+use a2a_pb::protojson_conv::{self, ProtoJsonPayload};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use reqwest::Client;
@@ -98,34 +99,48 @@ impl RestTransport {
         parse_rest_error(status, &body)
     }
 
-    async fn post_json<T: serde::de::DeserializeOwned>(
+    async fn post_json<Req, Resp>(
         &self,
         path: &str,
         params: &ServiceParams,
-        body: &impl serde::Serialize,
-    ) -> Result<T, A2AError> {
+        body: &Req,
+    ) -> Result<Resp, A2AError>
+    where
+        Req: ProtoJsonPayload,
+        Resp: ProtoJsonPayload,
+    {
+        let payload = protojson_conv::to_value(body).map_err(|e| {
+            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
+        })?;
         let resp = self
             .send(
                 self.build_request(reqwest::Method::POST, path, params)
-                    .json(body),
+                    .json(&payload),
             )
             .await?;
 
         if !resp.status().is_success() {
             return Err(Self::into_rest_error(resp).await);
         }
-
-        resp.json()
+        let payload = resp
+            .json::<Value>()
             .await
-            .map_err(|e| A2AError::internal(format!("failed to parse response: {e}")))
+            .map_err(|e| A2AError::internal(format!("failed to parse response: {e}")))?;
+
+        protojson_conv::from_value(payload).map_err(|e| {
+            A2AError::internal(format!("failed to deserialize response as ProtoJSON: {e}"))
+        })
     }
 
-    async fn get_json<T: serde::de::DeserializeOwned>(
+    async fn get_json<Resp>(
         &self,
         path: &str,
         params: &ServiceParams,
         query: &[(String, String)],
-    ) -> Result<T, A2AError> {
+    ) -> Result<Resp, A2AError>
+    where
+        Resp: ProtoJsonPayload,
+    {
         let resp = self
             .send(self.build_request_with_query(reqwest::Method::GET, path, params, query))
             .await?;
@@ -133,23 +148,33 @@ impl RestTransport {
         if !resp.status().is_success() {
             return Err(Self::into_rest_error(resp).await);
         }
-
-        resp.json()
+        let payload = resp
+            .json::<Value>()
             .await
-            .map_err(|e| A2AError::internal(format!("failed to parse response: {e}")))
+            .map_err(|e| A2AError::internal(format!("failed to parse response: {e}")))?;
+
+        protojson_conv::from_value(payload).map_err(|e| {
+            A2AError::internal(format!("failed to deserialize response as ProtoJSON: {e}"))
+        })
     }
 
-    async fn post_streaming(
+    async fn post_streaming<Req>(
         &self,
         path: &str,
         params: &ServiceParams,
-        body: &impl serde::Serialize,
-    ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
+        body: &Req,
+    ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError>
+    where
+        Req: ProtoJsonPayload,
+    {
+        let payload = protojson_conv::to_value(body).map_err(|e| {
+            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
+        })?;
         let resp = self
             .send(
                 self.build_request(reqwest::Method::POST, path, params)
                     .header("Accept", "text/event-stream")
-                    .json(body),
+                    .json(&payload),
             )
             .await?;
 

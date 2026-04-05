@@ -10,6 +10,12 @@ This crate is published as `agntcy-a2a-grpc` and imported in Rust as `a2a_grpc`.
 - Tonic service adapters for A2A request handlers
 - Conversion glue between native models and protobuf messages
 
+## Endpoint Format
+
+`GrpcTransport::connect` and `GrpcTransportFactory` accept both `http://host:port`
+and bare `host:port` endpoints. Bare endpoints are normalized to `http://...`
+before connecting so agent cards emitted by other SDKs remain usable.
+
 ## Install
 
 ```toml

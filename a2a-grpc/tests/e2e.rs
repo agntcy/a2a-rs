@@ -262,6 +262,13 @@ async fn spawn_grpc_server() -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{addr}"), handle)
 }
 
+fn endpoint_without_scheme(endpoint: &str) -> String {
+    endpoint
+        .split_once("://")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_else(|| endpoint.to_string())
+}
+
 fn send_message_request() -> SendMessageRequest {
     SendMessageRequest {
         message: sample_message(Role::User, "hello"),
@@ -450,11 +457,48 @@ async fn grpc_transport_streaming_and_error_paths() {
     let transport = factory
         .create(
             &sample_agent_card(),
-            &AgentInterface::new(endpoint, TRANSPORT_PROTOCOL_GRPC),
+            &AgentInterface::new(endpoint_without_scheme(&endpoint), TRANSPORT_PROTOCOL_GRPC),
         )
         .await
         .unwrap();
     transport.destroy().await.unwrap();
 
+    handle.abort();
+}
+
+#[tokio::test]
+async fn grpc_transport_accepts_bare_host_port_endpoints() {
+    let (endpoint, handle) = spawn_grpc_server().await;
+    let bare_endpoint = endpoint_without_scheme(&endpoint);
+
+    let transport = GrpcTransport::connect(bare_endpoint.clone()).await.unwrap();
+    let task = transport
+        .get_task(
+            &ServiceParams::new(),
+            &GetTaskRequest {
+                id: "task-1".to_string(),
+                history_length: Some(1),
+                tenant: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(task.id, "task-1");
+
+    let factory = GrpcTransportFactory;
+    let transport = factory
+        .create(
+            &sample_agent_card(),
+            &AgentInterface::new(bare_endpoint, TRANSPORT_PROTOCOL_GRPC),
+        )
+        .await
+        .unwrap();
+    let response = transport
+        .send_message(&ServiceParams::new(), &send_message_request())
+        .await
+        .unwrap();
+    assert!(matches!(response, SendMessageResponse::Task(_)));
+
+    transport.destroy().await.unwrap();
     handle.abort();
 }

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use a2a::*;
+use a2a_pb::protojson_conv::{self, ProtoJsonPayload};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -10,6 +11,7 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
+use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -130,22 +132,30 @@ pub fn rest_router<H: RequestHandler>(handler: Arc<H>) -> axum::Router {
 
 async fn handle_send_message<H: RequestHandler>(
     State(state): State<RestState<H>>,
-    Json(req): Json<SendMessageRequest>,
+    Json(raw_req): Json<Value>,
 ) -> impl IntoResponse {
+    let req = match protojson_conv::from_value::<SendMessageRequest>(raw_req) {
+        Ok(req) => req,
+        Err(e) => return rest_payload_error_response(e),
+    };
     let params = ServiceParams::new();
     match state.handler.send_message(&params, req).await {
-        Ok(resp) => Json(resp).into_response(),
+        Ok(resp) => protojson_json_response(&resp),
         Err(e) => rest_error_response(e),
     }
 }
 
 async fn handle_stream_message<H: RequestHandler>(
     State(state): State<RestState<H>>,
-    Json(req): Json<SendMessageRequest>,
+    Json(raw_req): Json<Value>,
 ) -> impl IntoResponse {
+    let req = match protojson_conv::from_value::<SendMessageRequest>(raw_req) {
+        Ok(req) => req,
+        Err(e) => return rest_payload_error_response(e),
+    };
     let params = ServiceParams::new();
     match state.handler.send_streaming_message(&params, req).await {
-        Ok(stream) => sse::sse_from_stream(stream).into_response(),
+        Ok(stream) => sse::sse_from_stream(protojson_stream(stream)).into_response(),
         Err(e) => rest_error_response(e),
     }
 }
@@ -168,7 +178,7 @@ async fn handle_get_task_inner<H: RequestHandler>(
         tenant: None,
     };
     match state.handler.get_task(&params, req).await {
-        Ok(task) => Json(task).into_response(),
+        Ok(task) => protojson_json_response(&task),
         Err(e) => rest_error_response(e),
     }
 }
@@ -224,7 +234,7 @@ async fn handle_list_tasks<H: RequestHandler>(
         tenant: None,
     };
     match state.handler.list_tasks(&params, req).await {
-        Ok(resp) => Json(resp).into_response(),
+        Ok(resp) => protojson_json_response(&resp),
         Err(e) => rest_error_response(e),
     }
 }
@@ -240,7 +250,7 @@ async fn handle_cancel_task_inner<H: RequestHandler>(
         tenant: None,
     };
     match state.handler.cancel_task(&params, req).await {
-        Ok(task) => Json(task).into_response(),
+        Ok(task) => protojson_json_response(&task),
         Err(e) => rest_error_response(e),
     }
 }
@@ -273,7 +283,7 @@ async fn handle_subscribe_to_task_inner<H: RequestHandler>(
     let params = ServiceParams::new();
     let req = SubscribeToTaskRequest { id, tenant: None };
     match state.handler.subscribe_to_task(&params, req).await {
-        Ok(stream) => sse::sse_from_stream(stream).into_response(),
+        Ok(stream) => sse::sse_from_stream(protojson_stream(stream)).into_response(),
         Err(e) => rest_error_response(e),
     }
 }
@@ -297,8 +307,12 @@ pub struct ListPushConfigsQuery {
 async fn handle_create_push_config<H: RequestHandler>(
     State(state): State<RestState<H>>,
     Path(id): Path<String>,
-    Json(config): Json<PushNotificationConfig>,
+    Json(raw_config): Json<Value>,
 ) -> impl IntoResponse {
+    let config = match protojson_conv::from_value::<PushNotificationConfig>(raw_config) {
+        Ok(config) => config,
+        Err(e) => return rest_payload_error_response(e),
+    };
     let params = ServiceParams::new();
     let req = CreateTaskPushNotificationConfigRequest {
         task_id: id,
@@ -306,7 +320,7 @@ async fn handle_create_push_config<H: RequestHandler>(
         tenant: None,
     };
     match state.handler.create_push_config(&params, req).await {
-        Ok(resp) => Json(resp).into_response(),
+        Ok(resp) => protojson_json_response(&resp),
         Err(e) => rest_error_response(e),
     }
 }
@@ -322,7 +336,7 @@ async fn handle_get_push_config<H: RequestHandler>(
         tenant: None,
     };
     match state.handler.get_push_config(&params, req).await {
-        Ok(resp) => Json(resp).into_response(),
+        Ok(resp) => protojson_json_response(&resp),
         Err(e) => rest_error_response(e),
     }
 }
@@ -340,7 +354,7 @@ async fn handle_list_push_configs<H: RequestHandler>(
         tenant: None,
     };
     match state.handler.list_push_configs(&params, req).await {
-        Ok(resp) => Json(resp).into_response(),
+        Ok(resp) => protojson_json_response(&resp),
         Err(e) => rest_error_response(e),
     }
 }
@@ -367,9 +381,38 @@ async fn handle_get_extended_agent_card<H: RequestHandler>(
     let params = ServiceParams::new();
     let req = GetExtendedAgentCardRequest { tenant: None };
     match state.handler.get_extended_agent_card(&params, req).await {
-        Ok(card) => Json(card).into_response(),
+        Ok(card) => protojson_json_response(&card),
         Err(e) => rest_error_response(e),
     }
+}
+
+fn protojson_json_response<T: ProtoJsonPayload>(value: &T) -> axum::response::Response {
+    match protojson_conv::to_value(value) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(e) => rest_error_response(A2AError::internal(format!(
+            "failed to serialize ProtoJSON payload: {e}"
+        ))),
+    }
+}
+
+fn protojson_stream(
+    stream: BoxStream<'static, Result<StreamResponse, A2AError>>,
+) -> BoxStream<'static, Result<Value, A2AError>> {
+    Box::pin(stream.map(|item| {
+        item.and_then(|value| {
+            protojson_conv::to_value(&value).map_err(|e| {
+                A2AError::internal(format!("failed to serialize ProtoJSON stream payload: {e}"))
+            })
+        })
+    }))
+}
+
+fn rest_payload_error_response(error: impl std::fmt::Display) -> axum::response::Response {
+    rest_error_response(A2AError {
+        code: error_code::PARSE_ERROR,
+        message: format!("invalid request body: {error}"),
+        details: None,
+    })
 }
 
 fn rest_error_response(err: A2AError) -> axum::response::Response {
@@ -459,6 +502,7 @@ mod tests {
     use crate::executor::ExecutorContext;
     use crate::handler::DefaultRequestHandler;
     use crate::task_store::InMemoryTaskStore;
+    use a2a_pb::protojson_conv;
     use axum::body::Body;
     use axum::http::Request;
     use futures::stream::BoxStream;
@@ -582,7 +626,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        let list_resp: ListTasksResponse = serde_json::from_slice(&body).unwrap();
+        let list_resp =
+            protojson_conv::from_str::<ListTasksResponse>(std::str::from_utf8(&body).unwrap())
+                .unwrap();
         assert!(list_resp.tasks.is_empty());
     }
 
