@@ -26,7 +26,7 @@ The workspace supports:
 | `a2a` | Core A2A types, errors, events, JSON-RPC types, and wire-compatible serde behavior |
 | `a2a-client` | Async A2A client with transport abstraction and protocol negotiation from agent cards |
 | `a2a-server` | Async server framework with REST and JSON-RPC bindings built on `axum` |
-| `a2a-pb` | Protobuf schema, generated types, and native <-> protobuf conversion helpers |
+| `a2a-pb` | Protobuf schema, generated types, ProtoJSON-capable generated types, and native <-> protobuf conversion helpers |
 | `a2a-grpc` | gRPC client and server bindings built on `tonic` |
 | `a2a-slimrpc` | SLIMRPC client and server bindings built on `slim_bindings` |
 | `examples/helloworld` | Minimal runnable example agent |

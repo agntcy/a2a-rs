@@ -13,6 +13,7 @@ name = "a2a_client"
 
 [dependencies]
 a2a = { workspace = true }
+a2a-pb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

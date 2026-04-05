@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use a2a::*;
+use a2a_pb::protojson_conv::{self, ProtoJsonPayload};
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use futures::{StreamExt, stream::BoxStream};
 use serde_json::Value;
 
 use crate::handler::RequestHandler;
@@ -62,68 +64,62 @@ async fn handle_unary_request<H: RequestHandler>(
     let raw_params = request.params.clone().unwrap_or(Value::Null);
 
     let result: Result<Value, A2AError> = match request.method.as_str() {
-        methods::SEND_MESSAGE => match serde_json::from_value::<SendMessageRequest>(raw_params) {
+        methods::SEND_MESSAGE => match protojson_conv::from_value::<SendMessageRequest>(raw_params) {
             Ok(req) => state.handler.send_message(params, req).await.and_then(|r| {
-                serde_json::to_value(r).map_err(|e| A2AError::internal(e.to_string()))
+                protojson_value(&r)
             }),
             Err(e) => Err(parse_error(e)),
         },
-        methods::GET_TASK => match serde_json::from_value::<GetTaskRequest>(raw_params) {
+        methods::GET_TASK => match protojson_conv::from_value::<GetTaskRequest>(raw_params) {
             Ok(req) => state.handler.get_task(params, req).await.and_then(|r| {
-                serde_json::to_value(r).map_err(|e| A2AError::internal(e.to_string()))
+                protojson_value(&r)
             }),
             Err(e) => Err(parse_error(e)),
         },
-        methods::LIST_TASKS => match serde_json::from_value::<ListTasksRequest>(raw_params) {
+        methods::LIST_TASKS => match protojson_conv::from_value::<ListTasksRequest>(raw_params) {
             Ok(req) => state.handler.list_tasks(params, req).await.and_then(|r| {
-                serde_json::to_value(r).map_err(|e| A2AError::internal(e.to_string()))
+                protojson_value(&r)
             }),
             Err(e) => Err(parse_error(e)),
         },
-        methods::CANCEL_TASK => match serde_json::from_value::<CancelTaskRequest>(raw_params) {
+        methods::CANCEL_TASK => match protojson_conv::from_value::<CancelTaskRequest>(raw_params) {
             Ok(req) => state.handler.cancel_task(params, req).await.and_then(|r| {
-                serde_json::to_value(r).map_err(|e| A2AError::internal(e.to_string()))
+                protojson_value(&r)
             }),
             Err(e) => Err(parse_error(e)),
         },
         methods::CREATE_PUSH_CONFIG => {
-            match serde_json::from_value::<CreateTaskPushNotificationConfigRequest>(raw_params) {
+            match protojson_conv::from_value::<CreateTaskPushNotificationConfigRequest>(raw_params) {
                 Ok(req) => state
                     .handler
                     .create_push_config(params, req)
                     .await
-                    .and_then(|r| {
-                        serde_json::to_value(r).map_err(|e| A2AError::internal(e.to_string()))
-                    }),
+                    .and_then(|r| protojson_value(&r)),
                 Err(e) => Err(parse_error(e)),
             }
         }
         methods::GET_PUSH_CONFIG => {
-            match serde_json::from_value::<GetTaskPushNotificationConfigRequest>(raw_params) {
+            match protojson_conv::from_value::<GetTaskPushNotificationConfigRequest>(raw_params) {
                 Ok(req) => state
                     .handler
                     .get_push_config(params, req)
                     .await
-                    .and_then(|r| {
-                        serde_json::to_value(r).map_err(|e| A2AError::internal(e.to_string()))
-                    }),
+                    .and_then(|r| protojson_value(&r)),
                 Err(e) => Err(parse_error(e)),
             }
         }
         methods::LIST_PUSH_CONFIGS => {
-            match serde_json::from_value::<ListTaskPushNotificationConfigsRequest>(raw_params) {
+            match protojson_conv::from_value::<ListTaskPushNotificationConfigsRequest>(raw_params) {
                 Ok(req) => state
                     .handler
                     .list_push_configs(params, req)
                     .await
-                    .and_then(|r| {
-                        serde_json::to_value(r).map_err(|e| A2AError::internal(e.to_string()))
-                    }),
+                    .and_then(|r| protojson_value(&r)),
                 Err(e) => Err(parse_error(e)),
             }
         }
         methods::DELETE_PUSH_CONFIG => {
-            match serde_json::from_value::<DeleteTaskPushNotificationConfigRequest>(raw_params) {
+            match protojson_conv::from_value::<DeleteTaskPushNotificationConfigRequest>(raw_params) {
                 Ok(req) => state
                     .handler
                     .delete_push_config(params, req)
@@ -133,14 +129,12 @@ async fn handle_unary_request<H: RequestHandler>(
             }
         }
         methods::GET_EXTENDED_AGENT_CARD => {
-            match serde_json::from_value::<GetExtendedAgentCardRequest>(raw_params) {
+            match protojson_conv::from_value::<GetExtendedAgentCardRequest>(raw_params) {
                 Ok(req) => state
                     .handler
                     .get_extended_agent_card(params, req)
                     .await
-                    .and_then(|r| {
-                        serde_json::to_value(r).map_err(|e| A2AError::internal(e.to_string()))
-                    }),
+                    .and_then(|r| protojson_value(&r)),
                 Err(e) => Err(parse_error(e)),
             }
         }
@@ -167,18 +161,18 @@ async fn handle_streaming_request<H: RequestHandler>(
 
     match request.method.as_str() {
         methods::SEND_STREAMING_MESSAGE => {
-            match serde_json::from_value::<SendMessageRequest>(raw_params) {
+            match protojson_conv::from_value::<SendMessageRequest>(raw_params) {
                 Ok(req) => match state.handler.send_streaming_message(params, req).await {
-                    Ok(stream) => sse::sse_jsonrpc_stream(id, stream).into_response(),
+                    Ok(stream) => sse::sse_jsonrpc_stream(id, protojson_stream(stream)).into_response(),
                     Err(e) => error_response(id, e),
                 },
                 Err(e) => error_response(id, parse_error(e)),
             }
         }
         methods::SUBSCRIBE_TO_TASK => {
-            match serde_json::from_value::<SubscribeToTaskRequest>(raw_params) {
+            match protojson_conv::from_value::<SubscribeToTaskRequest>(raw_params) {
                 Ok(req) => match state.handler.subscribe_to_task(params, req).await {
-                    Ok(stream) => sse::sse_jsonrpc_stream(id, stream).into_response(),
+                    Ok(stream) => sse::sse_jsonrpc_stream(id, protojson_stream(stream)).into_response(),
                     Err(e) => error_response(id, e),
                 },
                 Err(e) => error_response(id, parse_error(e)),
@@ -193,7 +187,24 @@ fn error_response(id: JsonRpcId, err: A2AError) -> axum::response::Response {
     (StatusCode::OK, Json(resp)).into_response()
 }
 
-fn parse_error(e: serde_json::Error) -> A2AError {
+fn protojson_value<T: ProtoJsonPayload>(value: &T) -> Result<Value, A2AError> {
+    protojson_conv::to_value(value)
+        .map_err(|e| A2AError::internal(format!("failed to serialize ProtoJSON payload: {e}")))
+}
+
+fn protojson_stream(
+    stream: BoxStream<'static, Result<StreamResponse, A2AError>>,
+) -> BoxStream<'static, Result<Value, A2AError>> {
+    Box::pin(stream.map(|item| {
+        item.and_then(|value| {
+            protojson_conv::to_value(&value).map_err(|e| {
+                A2AError::internal(format!("failed to serialize ProtoJSON stream payload: {e}"))
+            })
+        })
+    }))
+}
+
+fn parse_error(e: impl std::fmt::Display) -> A2AError {
     A2AError {
         code: error_code::PARSE_ERROR,
         message: format!("invalid params: {e}"),
@@ -204,6 +215,7 @@ fn parse_error(e: serde_json::Error) -> A2AError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a2a_pb::protojson_conv;
     use crate::executor::ExecutorContext;
     use crate::handler::DefaultRequestHandler;
     use crate::task_store::InMemoryTaskStore;
@@ -293,7 +305,8 @@ mod tests {
         });
         let resp = post_jsonrpc(app, methods::SEND_MESSAGE, params).await;
         assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-        assert!(resp.result.is_some());
+        let result = protojson_conv::from_value::<SendMessageResponse>(resp.result.unwrap()).unwrap();
+        assert!(matches!(result, SendMessageResponse::Task(_)));
     }
 
     #[tokio::test]
@@ -371,7 +384,8 @@ mod tests {
         let app = make_app();
         let params = serde_json::json!({});
         let resp = post_jsonrpc(app, methods::LIST_TASKS, params).await;
-        assert!(resp.result.is_some());
+        let result = protojson_conv::from_value::<ListTasksResponse>(resp.result.unwrap()).unwrap();
+        assert!(result.tasks.is_empty());
     }
 
     #[tokio::test]
