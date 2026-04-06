@@ -9,6 +9,7 @@ use reqwest::Client;
 use crate::push_config_compat::{
     deserialize_list_task_push_notification_configs_response,
     deserialize_task_push_notification_config,
+    serialize_create_task_push_notification_config_request,
 };
 use crate::transport::{ServiceParams, Transport, TransportFactory};
 
@@ -26,19 +27,13 @@ impl JsonRpcTransport {
         JsonRpcTransport { client, endpoint }
     }
 
-    async fn call_value<Req>(
+    async fn call_value_with_payload(
         &self,
         params: &ServiceParams,
         method: &str,
-        request_params: &Req,
-    ) -> Result<serde_json::Value, A2AError>
-    where
-        Req: ProtoJsonPayload,
-    {
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, A2AError> {
         let id = JsonRpcId::String(uuid::Uuid::now_v7().to_string());
-        let payload = protojson_conv::to_value(request_params).map_err(|e| {
-            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
-        })?;
         let rpc_request = JsonRpcRequest::new(id, method, Some(payload));
 
         let mut builder = self.client.post(&self.endpoint);
@@ -63,11 +58,25 @@ impl JsonRpcTransport {
             return Err(A2AError::new(err.code, err.message));
         }
 
-        let result = rpc_response
+        rpc_response
             .result
-            .ok_or_else(|| A2AError::internal("JSON-RPC response missing result"))?;
+            .ok_or_else(|| A2AError::internal("JSON-RPC response missing result"))
+    }
 
-        Ok(result)
+    async fn call_value<Req>(
+        &self,
+        params: &ServiceParams,
+        method: &str,
+        request_params: &Req,
+    ) -> Result<serde_json::Value, A2AError>
+    where
+        Req: ProtoJsonPayload,
+    {
+        let payload = protojson_conv::to_value(request_params).map_err(|e| {
+            A2AError::internal(format!("failed to serialize request as ProtoJSON: {e}"))
+        })?;
+
+        self.call_value_with_payload(params, method, payload).await
     }
 
     async fn call<Req, Resp>(
@@ -341,8 +350,9 @@ impl Transport for JsonRpcTransport {
         params: &ServiceParams,
         req: &CreateTaskPushNotificationConfigRequest,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
+        let payload = serialize_create_task_push_notification_config_request(req)?;
         let result = self
-            .call_value(params, methods::CREATE_PUSH_CONFIG, req)
+            .call_value_with_payload(params, methods::CREATE_PUSH_CONFIG, payload)
             .await?;
         deserialize_task_push_notification_config(result)
     }
