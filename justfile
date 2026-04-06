@@ -45,8 +45,12 @@ coverage:
 coverage-lcov:
     mkdir -p coverage
     rustup component add llvm-tools-preview --toolchain stable
-    rustup run stable cargo llvm-cov --workspace --lcov --output-path coverage/lcov.info --ignore-filename-regex 'gen/'
+    rustup run stable cargo llvm-cov --workspace --no-report --ignore-filename-regex 'gen/'
+    rustup run stable cargo llvm-cov report --lcov --output-path coverage/lcov.info --ignore-filename-regex 'gen/'
+    rm -rf target/llvm-cov/html
+    rustup run stable cargo llvm-cov report --html --output-dir target/llvm-cov --ignore-filename-regex 'gen/'
     @echo "LCOV report: coverage/lcov.info"
+    @echo "Coverage report: target/llvm-cov/html/index.html"
 
 # Run the helloworld example
 example:
