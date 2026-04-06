@@ -2,346 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 use a2a::*;
 use async_trait::async_trait;
-use futures::{StreamExt, stream::BoxStream};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{RwLock, broadcast};
+use futures::stream::BoxStream;
 
 use crate::middleware::ServiceParams;
-
-const EXECUTION_BUFFER_CAPACITY: usize = 32;
-
-#[derive(Clone)]
-struct ExecutionEvent {
-    sequence: u64,
-    result: Result<StreamResponse, A2AError>,
-}
-
-#[derive(Default)]
-struct ActiveExecutionState {
-    sequence: u64,
-    snapshot_task: Option<Task>,
-}
-
-struct ActiveExecution {
-    sender: broadcast::Sender<ExecutionEvent>,
-    state: RwLock<ActiveExecutionState>,
-}
-
-impl ActiveExecution {
-    fn new(task: Task) -> Arc<Self> {
-        let (sender, _) = broadcast::channel(EXECUTION_BUFFER_CAPACITY);
-        Arc::new(Self {
-            sender,
-            state: RwLock::new(ActiveExecutionState {
-                sequence: 0,
-                snapshot_task: Some(task),
-            }),
-        })
-    }
-
-    fn subscribe(&self) -> broadcast::Receiver<ExecutionEvent> {
-        self.sender.subscribe()
-    }
-
-    async fn resubscribe(&self) -> (broadcast::Receiver<ExecutionEvent>, Option<Task>, u64) {
-        let receiver = self.sender.subscribe();
-        let state = self.state.read().await;
-        (receiver, state.snapshot_task.clone(), state.sequence)
-    }
-
-    async fn publish(&self, result: Result<StreamResponse, A2AError>, snapshot_task: Option<Task>) {
-        let event = {
-            let mut state = self.state.write().await;
-            if let Some(task) = snapshot_task {
-                state.snapshot_task = Some(task);
-            }
-            state.sequence += 1;
-            ExecutionEvent {
-                sequence: state.sequence,
-                result,
-            }
-        };
-        let _ = self.sender.send(event);
-    }
-
-    async fn snapshot_is_terminal(&self) -> bool {
-        let state = self.state.read().await;
-        state
-            .snapshot_task
-            .as_ref()
-            .is_some_and(|task| task.status.state.is_terminal())
-    }
-}
-
-#[derive(Default)]
-struct ExecutionManager {
-    executions: RwLock<HashMap<TaskId, Arc<ActiveExecution>>>,
-}
-
-impl ExecutionManager {
-    async fn start(&self, task: Task) -> Result<Arc<ActiveExecution>, A2AError> {
-        let mut executions = self.executions.write().await;
-        if executions.contains_key(&task.id) {
-            return Err(A2AError::invalid_request(format!(
-                "task execution is already in progress: {}",
-                task.id
-            )));
-        }
-
-        let active = ActiveExecution::new(task.clone());
-        executions.insert(task.id.clone(), active.clone());
-        Ok(active)
-    }
-
-    async fn get(&self, task_id: &str) -> Option<Arc<ActiveExecution>> {
-        let executions = self.executions.read().await;
-        executions.get(task_id).cloned()
-    }
-
-    async fn resubscribe(
-        &self,
-        task_id: &str,
-    ) -> Option<(broadcast::Receiver<ExecutionEvent>, Option<Task>, u64)> {
-        let active = self.get(task_id).await?;
-        let (receiver, snapshot_task, sequence) = active.resubscribe().await;
-        Some((receiver, snapshot_task, sequence))
-    }
-
-    async fn finish(&self, task_id: &str, active: &Arc<ActiveExecution>) {
-        let mut executions = self.executions.write().await;
-        let should_remove = executions
-            .get(task_id)
-            .is_some_and(|current| Arc::ptr_eq(current, active));
-        if should_remove {
-            executions.remove(task_id);
-        }
-    }
-}
-
-struct ExecutionRuntime {
-    executor: Arc<dyn crate::AgentExecutor>,
-    task_store: Arc<dyn crate::TaskStore>,
-    push_config_store: Option<Arc<dyn crate::PushConfigStore>>,
-    push_sender: Option<Arc<crate::HttpPushSender>>,
-    execution_manager: Arc<ExecutionManager>,
-}
-
-struct SubscriptionState {
-    receiver: broadcast::Receiver<ExecutionEvent>,
-    snapshot_task: Option<Task>,
-    min_sequence: u64,
-    done: bool,
-}
-
-fn is_terminal_event(event: &StreamResponse) -> bool {
-    match event {
-        StreamResponse::Task(task) => task.status.state.is_terminal(),
-        StreamResponse::StatusUpdate(update) => update.status.state.is_terminal(),
-        _ => false,
-    }
-}
-
-fn task_id_for_event(event: &StreamResponse) -> Option<&str> {
-    match event {
-        StreamResponse::Task(task) => Some(&task.id),
-        StreamResponse::StatusUpdate(update) => Some(&update.task_id),
-        StreamResponse::ArtifactUpdate(update) => Some(&update.task_id),
-        StreamResponse::Message(_) => None,
-    }
-}
-
-fn should_interrupt_non_streaming(
-    req: &SendMessageRequest,
-    event: &StreamResponse,
-) -> Option<TaskId> {
-    if req
-        .configuration
-        .as_ref()
-        .and_then(|config| config.return_immediately)
-        .unwrap_or(false)
-    {
-        return match event {
-            StreamResponse::Message(_) => None,
-            _ => task_id_for_event(event).map(ToOwned::to_owned),
-        };
-    }
-
-    match event {
-        StreamResponse::Task(task) if task.status.state == TaskState::AuthRequired => {
-            Some(task.id.clone())
-        }
-        StreamResponse::StatusUpdate(update) if update.status.state == TaskState::AuthRequired => {
-            Some(update.task_id.clone())
-        }
-        _ => None,
-    }
-}
-
-async fn send_push_notifications(
-    task_id: &str,
-    push_config_store: Option<&dyn crate::PushConfigStore>,
-    push_sender: Option<&crate::HttpPushSender>,
-    event: &StreamResponse,
-) -> Result<(), A2AError> {
-    let Some(push_config_store) = push_config_store else {
-        return Ok(());
-    };
-    let Some(push_sender) = push_sender else {
-        return Ok(());
-    };
-
-    let configs = push_config_store.list(task_id).await?;
-    for config in configs {
-        push_sender.send_push(&config, event.clone()).await?;
-    }
-
-    Ok(())
-}
-
-async fn save_task(task_store: &dyn crate::TaskStore, task: Task) -> Result<Task, A2AError> {
-    match task_store.update(task.clone()).await {
-        Ok(_) => Ok(task),
-        Err(error) if error.code == error_code::TASK_NOT_FOUND => {
-            task_store.create(task.clone()).await?;
-            Ok(task)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-async fn apply_event_to_task(
-    task_store: &dyn crate::TaskStore,
-    current_task: Option<Task>,
-    event: &StreamResponse,
-) -> Result<Option<Task>, A2AError> {
-    match event {
-        StreamResponse::Task(task) => save_task(task_store, task.clone()).await.map(Some),
-        StreamResponse::StatusUpdate(update) => {
-            let mut task = current_task
-                .or(task_store.get(&update.task_id).await?)
-                .ok_or_else(|| A2AError::task_not_found(&update.task_id))?;
-            task.status = update.status.clone();
-            save_task(task_store, task).await.map(Some)
-        }
-        StreamResponse::ArtifactUpdate(update) => {
-            let mut task = current_task
-                .or(task_store.get(&update.task_id).await?)
-                .ok_or_else(|| A2AError::task_not_found(&update.task_id))?;
-            let artifacts = task.artifacts.get_or_insert_with(Vec::new);
-            artifacts.push(update.artifact.clone());
-            save_task(task_store, task).await.map(Some)
-        }
-        StreamResponse::Message(_) => Ok(current_task),
-    }
-}
-
-fn subscription_stream(
-    receiver: broadcast::Receiver<ExecutionEvent>,
-    snapshot_task: Option<Task>,
-    min_sequence: u64,
-) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
-    Box::pin(futures::stream::unfold(
-        SubscriptionState {
-            receiver,
-            snapshot_task,
-            min_sequence,
-            done: false,
-        },
-        |mut state| async move {
-            if state.done {
-                return None;
-            }
-
-            if let Some(task) = state.snapshot_task.take() {
-                if task.status.state.is_terminal() {
-                    state.done = true;
-                }
-                return Some((Ok(StreamResponse::Task(task)), state));
-            }
-
-            loop {
-                match state.receiver.recv().await {
-                    Ok(event) if event.sequence <= state.min_sequence => continue,
-                    Ok(event) => {
-                        state.min_sequence = event.sequence;
-                        match &event.result {
-                            Ok(item) if is_terminal_event(item) => state.done = true,
-                            Err(_) => state.done = true,
-                            _ => {}
-                        }
-                        return Some((event.result.clone(), state));
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        state.done = true;
-                        return Some((
-                            Err(A2AError::internal(
-                                "subscription fell behind active execution",
-                            )),
-                            state,
-                        ));
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        },
-    ))
-}
-
-async fn drive_execution(
-    runtime: ExecutionRuntime,
-    task_id: TaskId,
-    active: Arc<ActiveExecution>,
-    exec_ctx: crate::ExecutorContext,
-) {
-    let mut current_task = {
-        let state = active.state.read().await;
-        state.snapshot_task.clone()
-    };
-    let mut stream = runtime.executor.execute(exec_ctx);
-
-    while let Some(result) = stream.next().await {
-        if active.snapshot_is_terminal().await {
-            break;
-        }
-
-        match result {
-            Ok(event) => {
-                match apply_event_to_task(runtime.task_store.as_ref(), current_task.clone(), &event)
-                    .await
-                {
-                    Ok(updated_task) => {
-                        current_task = updated_task.clone();
-                        if let Err(error) = send_push_notifications(
-                            &task_id,
-                            runtime.push_config_store.as_deref(),
-                            runtime.push_sender.as_deref(),
-                            &event,
-                        )
-                        .await
-                        {
-                            active.publish(Err(error), None).await;
-                            break;
-                        }
-                        active.publish(Ok(event.clone()), updated_task).await;
-                        if is_terminal_event(&event) {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        active.publish(Err(error), None).await;
-                        break;
-                    }
-                }
-            }
-            Err(error) => {
-                active.publish(Err(error), None).await;
-                break;
-            }
-        }
-    }
-
-    runtime.execution_manager.finish(&task_id, &active).await;
-}
 
 /// Transport-agnostic request handler interface.
 ///
@@ -418,22 +81,18 @@ pub trait RequestHandler: Send + Sync + 'static {
 /// Default implementation of [`RequestHandler`] that orchestrates
 /// task lifecycle management, storage, and executor dispatch.
 pub struct DefaultRequestHandler {
-    executor: Arc<dyn crate::AgentExecutor>,
-    task_store: Arc<dyn crate::TaskStore>,
-    execution_manager: Arc<ExecutionManager>,
-    push_config_store: Option<Arc<dyn crate::PushConfigStore>>,
-    push_sender: Option<Arc<crate::HttpPushSender>>,
+    executor: Box<dyn crate::AgentExecutor>,
+    task_store: Box<dyn crate::TaskStore>,
+    push_config_store: Option<Box<dyn crate::PushConfigStore>>,
     capabilities: AgentCapabilities,
 }
 
 impl DefaultRequestHandler {
     pub fn new(executor: impl crate::AgentExecutor, task_store: impl crate::TaskStore) -> Self {
         DefaultRequestHandler {
-            executor: Arc::new(executor),
-            task_store: Arc::new(task_store),
-            execution_manager: Arc::new(ExecutionManager::default()),
+            executor: Box::new(executor),
+            task_store: Box::new(task_store),
             push_config_store: None,
-            push_sender: None,
             capabilities: AgentCapabilities::default(),
         }
     }
@@ -442,19 +101,7 @@ impl DefaultRequestHandler {
         mut self,
         push_config_store: impl crate::PushConfigStore,
     ) -> Self {
-        self.push_sender = Some(Arc::new(crate::HttpPushSender::new(None)));
-        self.push_config_store = Some(Arc::new(push_config_store));
-        self.capabilities.push_notifications = Some(true);
-        self
-    }
-
-    pub fn with_push_notifications(
-        mut self,
-        push_config_store: impl crate::PushConfigStore,
-        push_sender: crate::HttpPushSender,
-    ) -> Self {
-        self.push_config_store = Some(Arc::new(push_config_store));
-        self.push_sender = Some(Arc::new(push_sender));
+        self.push_config_store = Some(Box::new(push_config_store));
         self.capabilities.push_notifications = Some(true);
         self
     }
@@ -469,31 +116,32 @@ impl DefaultRequestHandler {
             .as_deref()
             .ok_or_else(A2AError::push_notification_not_supported)
     }
+}
 
-    async fn load_task(&self, task_id: &str) -> Result<Task, A2AError> {
-        self.task_store
-            .get(task_id)
-            .await?
-            .ok_or_else(|| A2AError::task_not_found(task_id))
-    }
-
-    async fn prepare_task_for_execution(
+#[async_trait]
+impl RequestHandler for DefaultRequestHandler {
+    async fn send_message(
         &self,
-        req: &SendMessageRequest,
-    ) -> Result<(Task, Option<Task>, String), A2AError> {
+        params: &ServiceParams,
+        req: SendMessageRequest,
+    ) -> Result<SendMessageResponse, A2AError> {
+        use futures::StreamExt;
+
         let task_id = req.message.task_id.clone().unwrap_or_else(new_task_id);
-        let stored = self.task_store.get(&task_id).await?;
-        let context_id = stored
-            .as_ref()
-            .map(|task| task.context_id.clone())
-            .or_else(|| req.message.context_id.clone())
+        let context_id = req
+            .message
+            .context_id
+            .clone()
             .unwrap_or_else(new_context_id);
 
-        let task = if let Some(existing) = stored.clone() {
+        let stored = self.task_store.get(&task_id).await.ok().flatten();
+
+        // Create or update task in store
+        let task = if let Some(existing) = stored {
             existing
         } else {
             let task = Task {
-                id: task_id,
+                id: task_id.clone(),
                 context_id: context_id.clone(),
                 status: TaskStatus {
                     state: TaskState::Submitted,
@@ -508,109 +156,44 @@ impl DefaultRequestHandler {
             task
         };
 
-        Ok((task, stored, context_id))
-    }
-
-    async fn save_request_push_config(
-        &self,
-        task_id: &str,
-        req: &SendMessageRequest,
-    ) -> Result<(), A2AError> {
-        let Some(config) = req
-            .configuration
-            .as_ref()
-            .and_then(|configuration| configuration.push_notification_config.clone())
-        else {
-            return Ok(());
-        };
-
-        self.push_config_store()?.save(task_id, config).await?;
-        Ok(())
-    }
-
-    async fn start_execution(
-        &self,
-        params: &ServiceParams,
-        req: SendMessageRequest,
-        include_task_snapshot_in_context: bool,
-    ) -> Result<(TaskId, BoxStream<'static, Result<StreamResponse, A2AError>>), A2AError> {
-        let (task, stored_task, context_id) = self.prepare_task_for_execution(&req).await?;
-        let task_id = task.id.clone();
-        self.save_request_push_config(&task_id, &req).await?;
-        let active = self.execution_manager.start(task.clone()).await?;
-        let receiver = active.subscribe();
-
         let exec_ctx = crate::ExecutorContext {
-            message: Some(req.message),
+            message: Some(req.message.clone()),
             task_id: task_id.clone(),
-            stored_task: if include_task_snapshot_in_context {
-                Some(task.clone())
-            } else {
-                stored_task
-            },
+            stored_task: Some(task.clone()),
             context_id,
-            metadata: req.metadata,
+            metadata: req.metadata.clone(),
             user: None,
             service_params: params.clone(),
-            tenant: req.tenant,
+            tenant: req.tenant.clone(),
         };
 
-        let runtime = ExecutionRuntime {
-            executor: Arc::clone(&self.executor),
-            task_store: Arc::clone(&self.task_store),
-            push_config_store: self.push_config_store.clone(),
-            push_sender: self.push_sender.clone(),
-            execution_manager: Arc::clone(&self.execution_manager),
-        };
-        let active_execution = active.clone();
-        let execution_task_id = task_id.clone();
+        let mut stream = self.executor.execute(exec_ctx);
+        let mut final_task = task;
 
-        tokio::spawn(async move {
-            drive_execution(runtime, execution_task_id, active_execution, exec_ctx).await;
-        });
-
-        Ok((task_id, subscription_stream(receiver, None, 0)))
-    }
-}
-
-#[async_trait]
-impl RequestHandler for DefaultRequestHandler {
-    async fn send_message(
-        &self,
-        params: &ServiceParams,
-        req: SendMessageRequest,
-    ) -> Result<SendMessageResponse, A2AError> {
-        let (task_id, mut stream) = self.start_execution(params, req.clone(), true).await?;
-        let mut last_event = None;
-
-        while let Some(item) = stream.next().await {
-            let event = item?;
-
-            if let Some(interrupt_task_id) = should_interrupt_non_streaming(&req, &event) {
-                return Ok(SendMessageResponse::Task(
-                    self.load_task(&interrupt_task_id).await?,
-                ));
-            }
-
-            match event {
-                StreamResponse::Message(message) => {
-                    return Ok(SendMessageResponse::Message(message));
+        // Collect events until terminal state
+        while let Some(event) = stream.next().await {
+            match event? {
+                StreamResponse::Task(t) => {
+                    final_task = t;
                 }
-                other => last_event = Some(other),
+                StreamResponse::StatusUpdate(su) => {
+                    final_task.status = su.status;
+                }
+                StreamResponse::ArtifactUpdate(au) => {
+                    let artifacts = final_task.artifacts.get_or_insert_with(Vec::new);
+                    artifacts.push(au.artifact);
+                }
+                StreamResponse::Message(msg) => {
+                    return Ok(SendMessageResponse::Message(msg));
+                }
+            }
+            if final_task.status.state.is_terminal() {
+                break;
             }
         }
 
-        match last_event {
-            Some(StreamResponse::Task(task)) => Ok(SendMessageResponse::Task(task)),
-            Some(StreamResponse::StatusUpdate(update)) => Ok(SendMessageResponse::Task(
-                self.load_task(&update.task_id).await?,
-            )),
-            Some(StreamResponse::ArtifactUpdate(update)) => Ok(SendMessageResponse::Task(
-                self.load_task(&update.task_id).await?,
-            )),
-            Some(StreamResponse::Message(message)) => Ok(SendMessageResponse::Message(message)),
-            None => Ok(SendMessageResponse::Task(self.load_task(&task_id).await?)),
-        }
+        self.task_store.update(final_task.clone()).await?;
+        Ok(SendMessageResponse::Task(final_task))
     }
 
     async fn send_streaming_message(
@@ -618,8 +201,43 @@ impl RequestHandler for DefaultRequestHandler {
         params: &ServiceParams,
         req: SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        let (_, stream) = self.start_execution(params, req, false).await?;
-        Ok(stream)
+        let task_id = req.message.task_id.clone().unwrap_or_else(new_task_id);
+        let context_id = req
+            .message
+            .context_id
+            .clone()
+            .unwrap_or_else(new_context_id);
+
+        let stored = self.task_store.get(&task_id).await.ok().flatten();
+
+        if stored.is_none() {
+            let task = Task {
+                id: task_id.clone(),
+                context_id: context_id.clone(),
+                status: TaskStatus {
+                    state: TaskState::Submitted,
+                    message: None,
+                    timestamp: Some(chrono::Utc::now()),
+                },
+                artifacts: None,
+                history: Some(vec![req.message.clone()]),
+                metadata: None,
+            };
+            self.task_store.create(task).await?;
+        }
+
+        let exec_ctx = crate::ExecutorContext {
+            message: Some(req.message),
+            task_id,
+            stored_task: stored,
+            context_id,
+            metadata: req.metadata,
+            user: None,
+            service_params: params.clone(),
+            tenant: req.tenant,
+        };
+
+        Ok(self.executor.execute(exec_ctx))
     }
 
     async fn get_task(
@@ -646,13 +264,17 @@ impl RequestHandler for DefaultRequestHandler {
         params: &ServiceParams,
         req: CancelTaskRequest,
     ) -> Result<Task, A2AError> {
-        let task = self.load_task(&req.id).await?;
+        let task = self
+            .task_store
+            .get(&req.id)
+            .await?
+            .ok_or_else(|| A2AError::task_not_found(&req.id))?;
 
         if task.status.state.is_terminal() {
             return Err(A2AError::task_not_cancelable(&req.id));
         }
 
-        let active_execution = self.execution_manager.get(&req.id).await;
+        use futures::StreamExt;
 
         let exec_ctx = crate::ExecutorContext {
             message: None,
@@ -666,59 +288,28 @@ impl RequestHandler for DefaultRequestHandler {
         };
 
         let mut stream = self.executor.cancel(exec_ctx);
-        let mut current_task = Some(task);
+        let mut final_task = task;
 
         while let Some(event) = stream.next().await {
-            match event {
-                Ok(event) => {
-                    let updated_task =
-                        apply_event_to_task(self.task_store.as_ref(), current_task.clone(), &event)
-                            .await?;
-                    current_task = updated_task.clone();
-
-                    send_push_notifications(
-                        &req.id,
-                        self.push_config_store.as_deref(),
-                        self.push_sender.as_deref(),
-                        &event,
-                    )
-                    .await?;
-
-                    if let Some(active) = &active_execution {
-                        active.publish(Ok(event.clone()), updated_task).await;
-                    }
-
-                    if is_terminal_event(&event) {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    if let Some(active) = &active_execution {
-                        active.publish(Err(error.clone()), None).await;
-                    }
-                    return Err(error);
-                }
+            match event? {
+                StreamResponse::Task(t) => final_task = t,
+                StreamResponse::StatusUpdate(su) => final_task.status = su.status,
+                _ => {}
             }
         }
 
-        if let Some(active) = active_execution {
-            self.execution_manager.finish(&req.id, &active).await;
-        }
-
-        self.load_task(&req.id).await
+        self.task_store.update(final_task.clone()).await?;
+        Ok(final_task)
     }
 
     async fn subscribe_to_task(
         &self,
         _params: &ServiceParams,
-        req: SubscribeToTaskRequest,
+        _req: SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        let (receiver, snapshot_task, sequence) = self
-            .execution_manager
-            .resubscribe(&req.id)
-            .await
-            .ok_or_else(|| A2AError::task_not_found(&req.id))?;
-        Ok(subscription_stream(receiver, snapshot_task, sequence))
+        Err(A2AError::unsupported_operation(
+            "subscribe_to_task not yet implemented",
+        ))
     }
 
     async fn create_push_config(
@@ -809,38 +400,12 @@ impl RequestHandler for DefaultRequestHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        Router,
-        body::Bytes,
-        extract::State,
-        http::{HeaderMap, StatusCode, header},
-        routing::post,
-    };
     use crate::executor::ExecutorContext;
     use crate::push::InMemoryPushConfigStore;
     use crate::task_store::InMemoryTaskStore;
     use futures::stream;
-    use std::sync::Arc;
-    use tokio::{
-        net::TcpListener,
-        sync::{Notify, mpsc, oneshot},
-        time::{Duration, timeout},
-    };
 
     struct EchoExecutor;
-
-    struct PushEventExecutor;
-
-    struct ResumableExecutor {
-        release: Arc<Notify>,
-    }
-
-    #[derive(Debug)]
-    struct CapturedPush {
-        authorization: Option<String>,
-        notification_token: Option<String>,
-        event: StreamResponse,
-    }
 
     impl crate::AgentExecutor for EchoExecutor {
         fn execute(
@@ -882,125 +447,6 @@ mod tests {
         }
     }
 
-    impl crate::AgentExecutor for PushEventExecutor {
-        fn execute(
-            &self,
-            ctx: ExecutorContext,
-        ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
-            let working = StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
-                task_id: ctx.task_id.clone(),
-                context_id: ctx.context_id.clone(),
-                status: TaskStatus {
-                    state: TaskState::Working,
-                    message: None,
-                    timestamp: None,
-                },
-                metadata: None,
-            });
-            let completed = StreamResponse::Task(Task {
-                id: ctx.task_id.clone(),
-                context_id: ctx.context_id.clone(),
-                status: TaskStatus {
-                    state: TaskState::Completed,
-                    message: ctx.message,
-                    timestamp: None,
-                },
-                artifacts: None,
-                history: ctx.stored_task.and_then(|task| task.history),
-                metadata: None,
-            });
-
-            Box::pin(stream::iter(vec![Ok(working), Ok(completed)]))
-        }
-
-        fn cancel(
-            &self,
-            ctx: ExecutorContext,
-        ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
-            let task = Task {
-                id: ctx.task_id.clone(),
-                context_id: ctx.context_id.clone(),
-                status: TaskStatus {
-                    state: TaskState::Canceled,
-                    message: None,
-                    timestamp: None,
-                },
-                artifacts: None,
-                history: None,
-                metadata: None,
-            };
-            Box::pin(stream::once(async move { Ok(StreamResponse::Task(task)) }))
-        }
-    }
-
-    impl crate::AgentExecutor for ResumableExecutor {
-        fn execute(
-            &self,
-            ctx: ExecutorContext,
-        ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
-            let release = self.release.clone();
-            let working_task = Task {
-                id: ctx.task_id.clone(),
-                context_id: ctx.context_id.clone(),
-                status: TaskStatus {
-                    state: TaskState::Working,
-                    message: None,
-                    timestamp: None,
-                },
-                artifacts: None,
-                history: ctx.stored_task.and_then(|task| task.history),
-                metadata: None,
-            };
-            let completed_task = Task {
-                id: working_task.id.clone(),
-                context_id: working_task.context_id.clone(),
-                status: TaskStatus {
-                    state: TaskState::Completed,
-                    message: None,
-                    timestamp: None,
-                },
-                artifacts: None,
-                history: working_task.history.clone(),
-                metadata: None,
-            };
-
-            Box::pin(stream::unfold(
-                (Some(working_task), Some((release, completed_task))),
-                |(working_task, completion)| async move {
-                    if let Some(task) = working_task {
-                        return Some((Ok(StreamResponse::Task(task)), (None, completion)));
-                    }
-
-                    if let Some((release, task)) = completion {
-                        release.notified().await;
-                        return Some((Ok(StreamResponse::Task(task)), (None, None)));
-                    }
-
-                    None
-                },
-            ))
-        }
-
-        fn cancel(
-            &self,
-            ctx: ExecutorContext,
-        ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
-            let task = Task {
-                id: ctx.task_id.clone(),
-                context_id: ctx.context_id.clone(),
-                status: TaskStatus {
-                    state: TaskState::Canceled,
-                    message: None,
-                    timestamp: None,
-                },
-                artifacts: None,
-                history: None,
-                metadata: None,
-            };
-            Box::pin(stream::once(async move { Ok(StreamResponse::Task(task)) }))
-        }
-    }
-
     fn make_handler() -> DefaultRequestHandler {
         DefaultRequestHandler::new(EchoExecutor, InMemoryTaskStore::new())
     }
@@ -1010,77 +456,8 @@ mod tests {
             .with_push_config_store(InMemoryPushConfigStore::new())
     }
 
-    fn make_push_delivery_handler() -> DefaultRequestHandler {
-        DefaultRequestHandler::new(PushEventExecutor, InMemoryTaskStore::new())
-            .with_push_config_store(InMemoryPushConfigStore::new())
-    }
-
-    fn make_resumable_handler() -> (DefaultRequestHandler, Arc<Notify>) {
-        let release = Arc::new(Notify::new());
-        (
-            DefaultRequestHandler::new(
-                ResumableExecutor {
-                    release: release.clone(),
-                },
-                InMemoryTaskStore::new(),
-            ),
-            release,
-        )
-    }
-
     fn make_message() -> Message {
         Message::new(Role::User, vec![Part::text("hello")])
-    }
-
-    async fn capture_push(
-        State(sender): State<mpsc::UnboundedSender<CapturedPush>>,
-        headers: HeaderMap,
-        body: Bytes,
-    ) -> StatusCode {
-        let captured = CapturedPush {
-            authorization: headers
-                .get(header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            notification_token: headers
-                .get("A2A-Notification-Token")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            event: serde_json::from_slice(&body).unwrap(),
-        };
-        sender.send(captured).unwrap();
-        StatusCode::ACCEPTED
-    }
-
-    async fn start_push_webhook(
-    ) -> (
-        String,
-        mpsc::UnboundedReceiver<CapturedPush>,
-        oneshot::Sender<()>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let app = Router::new().route("/", post(capture_push)).with_state(sender);
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .unwrap();
-        });
-
-        (format!("http://{address}/"), receiver, shutdown_tx, server)
-    }
-
-    async fn next_push(receiver: &mut mpsc::UnboundedReceiver<CapturedPush>) -> CapturedPush {
-        timeout(Duration::from_secs(5), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap()
     }
 
     #[tokio::test]
@@ -1244,7 +621,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_subscribe_requires_active_execution() {
+    async fn test_subscribe_not_implemented() {
         let handler = make_handler();
         let params = ServiceParams::new();
         let req = SubscribeToTaskRequest {
@@ -1252,87 +629,7 @@ mod tests {
             tenant: None,
         };
         let result = handler.subscribe_to_task(&params, req).await;
-        match result {
-            Ok(_) => panic!("expected subscribe_to_task to fail"),
-            Err(error) => assert_eq!(error.code, error_code::TASK_NOT_FOUND),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_send_message_return_immediately_allows_resubscribe() {
-        use futures::StreamExt;
-
-        let (handler, release) = make_resumable_handler();
-        let params = ServiceParams::new();
-        let mut message = make_message();
-        message.task_id = Some("t-resume".into());
-        message.context_id = Some("c-resume".into());
-
-        let response = handler
-            .send_message(
-                &params,
-                SendMessageRequest {
-                    message,
-                    configuration: Some(SendMessageConfiguration {
-                        accepted_output_modes: None,
-                        push_notification_config: None,
-                        history_length: None,
-                        return_immediately: Some(true),
-                    }),
-                    metadata: None,
-                    tenant: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        match response {
-            SendMessageResponse::Task(task) => {
-                assert_eq!(task.status.state, TaskState::Working);
-            }
-            _ => panic!("expected Task response"),
-        }
-
-        let mut subscription = handler
-            .subscribe_to_task(
-                &params,
-                SubscribeToTaskRequest {
-                    id: "t-resume".into(),
-                    tenant: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        let snapshot = subscription.next().await.unwrap().unwrap();
-        match snapshot {
-            StreamResponse::Task(task) => assert_eq!(task.status.state, TaskState::Working),
-            _ => panic!("expected snapshot task"),
-        }
-
-        release.notify_waiters();
-
-        let terminal = subscription.next().await.unwrap().unwrap();
-        match terminal {
-            StreamResponse::Task(task) => assert_eq!(task.status.state, TaskState::Completed),
-            _ => panic!("expected terminal task"),
-        }
-
-        assert!(subscription.next().await.is_none());
-
-        let result = handler
-            .subscribe_to_task(
-                &params,
-                SubscribeToTaskRequest {
-                    id: "t-resume".into(),
-                    tenant: None,
-                },
-            )
-            .await;
-        match result {
-            Ok(_) => panic!("expected subscribe_to_task to fail after completion"),
-            Err(error) => assert_eq!(error.code, error_code::TASK_NOT_FOUND),
-        }
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -1467,153 +764,6 @@ mod tests {
             .unwrap();
         assert_eq!(remaining.configs.len(), 1);
         assert_eq!(remaining.configs[0].config.id.as_deref(), Some("cfg-2"));
-    }
-
-    #[tokio::test]
-    async fn test_send_message_request_push_config_delivers_webhooks() {
-        let (url, mut receiver, shutdown_tx, server) = start_push_webhook().await;
-        let handler = make_push_delivery_handler();
-        let params = ServiceParams::new();
-        let mut message = make_message();
-        message.task_id = Some("t-push-request".into());
-        message.context_id = Some("c-push-request".into());
-
-        let response = handler
-            .send_message(
-                &params,
-                SendMessageRequest {
-                    message,
-                    configuration: Some(SendMessageConfiguration {
-                        accepted_output_modes: None,
-                        push_notification_config: Some(PushNotificationConfig {
-                            url: url.clone(),
-                            id: Some("cfg-request".into()),
-                            token: Some("notify-token".into()),
-                            authentication: Some(AuthenticationInfo {
-                                scheme: "bearer".into(),
-                                credentials: Some("secret-token".into()),
-                            }),
-                        }),
-                        history_length: None,
-                        return_immediately: None,
-                    }),
-                    metadata: None,
-                    tenant: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        match response {
-            SendMessageResponse::Task(task) => assert_eq!(task.status.state, TaskState::Completed),
-            _ => panic!("expected Task response"),
-        }
-
-        let saved = handler
-            .get_push_config(
-                &params,
-                GetTaskPushNotificationConfigRequest {
-                    task_id: "t-push-request".into(),
-                    id: "cfg-request".into(),
-                    tenant: None,
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(saved.config.url, url);
-
-        let first = next_push(&mut receiver).await;
-        assert_eq!(first.authorization.as_deref(), Some("Bearer secret-token"));
-        assert_eq!(first.notification_token.as_deref(), Some("notify-token"));
-        match first.event {
-            StreamResponse::StatusUpdate(update) => {
-                assert_eq!(update.task_id, "t-push-request");
-                assert_eq!(update.status.state, TaskState::Working);
-            }
-            _ => panic!("expected status update push"),
-        }
-
-        let second = next_push(&mut receiver).await;
-        assert_eq!(second.authorization.as_deref(), Some("Bearer secret-token"));
-        assert_eq!(second.notification_token.as_deref(), Some("notify-token"));
-        match second.event {
-            StreamResponse::Task(task) => {
-                assert_eq!(task.id, "t-push-request");
-                assert_eq!(task.status.state, TaskState::Completed);
-            }
-            _ => panic!("expected final task push"),
-        }
-
-        shutdown_tx.send(()).unwrap();
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_send_message_stored_push_config_delivers_webhooks() {
-        let (url, mut receiver, shutdown_tx, server) = start_push_webhook().await;
-        let handler = make_push_delivery_handler();
-        let params = ServiceParams::new();
-
-        handler
-            .create_push_config(
-                &params,
-                CreateTaskPushNotificationConfigRequest {
-                    task_id: "t-push-stored".into(),
-                    config: PushNotificationConfig {
-                        url: url.clone(),
-                        id: Some("cfg-stored".into()),
-                        token: Some("stored-token".into()),
-                        authentication: None,
-                    },
-                    tenant: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        let mut message = make_message();
-        message.task_id = Some("t-push-stored".into());
-        message.context_id = Some("c-push-stored".into());
-        let response = handler
-            .send_message(
-                &params,
-                SendMessageRequest {
-                    message,
-                    configuration: None,
-                    metadata: None,
-                    tenant: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        match response {
-            SendMessageResponse::Task(task) => assert_eq!(task.status.state, TaskState::Completed),
-            _ => panic!("expected Task response"),
-        }
-
-        let first = next_push(&mut receiver).await;
-        assert_eq!(first.notification_token.as_deref(), Some("stored-token"));
-        match first.event {
-            StreamResponse::StatusUpdate(update) => {
-                assert_eq!(update.task_id, "t-push-stored");
-                assert_eq!(update.status.state, TaskState::Working);
-            }
-            _ => panic!("expected status update push"),
-        }
-
-        let second = next_push(&mut receiver).await;
-        assert_eq!(second.notification_token.as_deref(), Some("stored-token"));
-        match second.event {
-            StreamResponse::Task(task) => {
-                assert_eq!(task.id, "t-push-stored");
-                assert_eq!(task.status.state, TaskState::Completed);
-            }
-            _ => panic!("expected final task push"),
-        }
-
-        shutdown_tx.send(()).unwrap();
-        server.await.unwrap();
     }
 
     #[tokio::test]
