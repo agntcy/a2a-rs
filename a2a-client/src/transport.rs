@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use a2a::*;
 use async_trait::async_trait;
+use auto_impl::auto_impl;
 use futures::stream::BoxStream;
 use std::collections::HashMap;
 
@@ -11,7 +12,11 @@ pub type ServiceParams = HashMap<String, Vec<String>>;
 ///
 /// Each protocol binding (JSON-RPC, REST, gRPC, or custom) implements this trait.
 /// The [`TransportFactory`] creates instances of `Transport` for a given agent interface.
+///
+/// A blanket implementation for `Box<dyn Transport>` is automatically derived via
+/// [`auto_impl`], enabling `A2AClient<Box<dyn Transport>>` for runtime-selected transports.
 #[async_trait]
+#[auto_impl(Box)]
 pub trait Transport: Send + Sync {
     async fn send_message(
         &self,

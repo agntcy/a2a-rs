@@ -466,7 +466,7 @@ async fn run_push_config_command(cli: &Cli, command: &PushConfigCommand) -> Resu
     Ok(())
 }
 
-async fn resolve_client(cli: &Cli) -> Result<A2AClient, CliError> {
+async fn resolve_client(cli: &Cli) -> Result<A2AClient<Box<dyn a2a_client::Transport>>, CliError> {
     let card = resolve_agent_card(cli).await?;
 
     let mut builder = A2AClientFactory::builder();
@@ -535,10 +535,10 @@ fn parse_header(input: &str) -> Result<HeaderArg, String> {
     })
 }
 
-async fn finish_client_call<T>(
-    client: A2AClient,
-    result: Result<T, A2AError>,
-) -> Result<T, CliError> {
+async fn finish_client_call<T: a2a_client::Transport, V>(
+    client: A2AClient<T>,
+    result: Result<V, A2AError>,
+) -> Result<V, CliError> {
     match result {
         Ok(value) => {
             client.destroy().await?;
@@ -551,9 +551,9 @@ async fn finish_client_call<T>(
     }
 }
 
-async fn consume_stream<T: Serialize>(
-    client: A2AClient,
-    mut stream: BoxStream<'static, Result<T, A2AError>>,
+async fn consume_stream<T: a2a_client::Transport, V: Serialize>(
+    client: A2AClient<T>,
+    mut stream: BoxStream<'static, Result<V, A2AError>>,
     compact: bool,
 ) -> Result<(), CliError> {
     loop {
@@ -708,8 +708,8 @@ mod tests {
         }
     }
 
-    fn make_test_client(destroy_error: Option<A2AError>) -> A2AClient {
-        A2AClient::new(Box::new(TestTransport { destroy_error }))
+    fn make_test_client(destroy_error: Option<A2AError>) -> A2AClient<TestTransport> {
+        A2AClient::new(TestTransport { destroy_error })
     }
 
     #[derive(Default)]

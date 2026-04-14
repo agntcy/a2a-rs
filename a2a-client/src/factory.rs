@@ -69,7 +69,10 @@ impl A2AClientFactory {
     /// 2. Look up matching factory by (protocol, major_version)
     /// 3. Rank candidates: client preference order, then newest version
     /// 4. Try connecting in rank order; first success wins
-    pub async fn create_from_card(&self, card: &AgentCard) -> Result<A2AClient, A2AError> {
+    pub async fn create_from_card(
+        &self,
+        card: &AgentCard,
+    ) -> Result<A2AClient<Box<dyn crate::Transport>>, A2AError> {
         let mut candidates: Vec<(usize, &AgentInterface, &Arc<dyn TransportFactory>)> = Vec::new();
 
         for iface in &card.supported_interfaces {

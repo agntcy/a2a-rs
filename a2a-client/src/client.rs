@@ -10,14 +10,14 @@ use crate::middleware::CallInterceptor;
 use crate::transport::{ServiceParams, Transport};
 
 /// High-level A2A client wrapping a transport with middleware.
-pub struct A2AClient {
-    transport: Box<dyn Transport>,
+pub struct A2AClient<T: Transport> {
+    transport: T,
     interceptors: Vec<Arc<dyn CallInterceptor>>,
     default_params: ServiceParams,
 }
 
-impl A2AClient {
-    pub fn new(transport: Box<dyn Transport>) -> Self {
+impl<T: Transport> A2AClient<T> {
+    pub fn new(transport: T) -> Self {
         let mut default_params = ServiceParams::new();
         default_params.insert(SVC_PARAM_VERSION.to_string(), vec![VERSION.to_string()]);
         A2AClient {
@@ -55,11 +55,11 @@ impl A2AClient {
         Ok(())
     }
 
-    async fn finish_call<T>(
+    async fn finish_call<R>(
         &self,
         method: &str,
-        result: Result<T, A2AError>,
-    ) -> Result<T, A2AError> {
+        result: Result<R, A2AError>,
+    ) -> Result<R, A2AError> {
         let status = result.as_ref().map(|_| ()).map_err(Clone::clone);
         let after_result = self.apply_after(method, &status).await;
 
@@ -177,7 +177,7 @@ pub trait SendMessageExt {
 }
 
 #[async_trait]
-impl SendMessageExt for A2AClient {
+impl<T: Transport> SendMessageExt for A2AClient<T> {
     async fn send_text(
         &self,
         text: impl Into<String> + Send,
@@ -422,9 +422,9 @@ mod tests {
         }
     }
 
-    fn make_client() -> A2AClient {
+    fn make_client() -> A2AClient<MockTransport> {
         let (transport, _) = MockTransport::new();
-        A2AClient::new(Box::new(transport))
+        A2AClient::new(transport)
     }
 
     struct RecordingInterceptor {
@@ -490,7 +490,7 @@ mod tests {
     async fn test_send_message_applies_interceptors_and_reverses_after_order() {
         let (transport, state) = MockTransport::new();
         let events = Arc::new(Mutex::new(Vec::new()));
-        let client = A2AClient::new(Box::new(transport)).with_interceptors(vec![
+        let client = A2AClient::new(transport).with_interceptors(vec![
             Arc::new(RecordingInterceptor {
                 name: "first",
                 events: events.clone(),
@@ -534,12 +534,11 @@ mod tests {
         let (transport, state) = MockTransport::new();
         *state.send_message_error.lock().unwrap() = Some(A2AError::internal("boom"));
         let events = Arc::new(Mutex::new(Vec::new()));
-        let client = A2AClient::new(Box::new(transport)).with_interceptors(vec![Arc::new(
-            RecordingInterceptor {
+        let client =
+            A2AClient::new(transport).with_interceptors(vec![Arc::new(RecordingInterceptor {
                 name: "only",
                 events: events.clone(),
-            },
-        )]);
+            })]);
 
         let req = SendMessageRequest {
             message: Message::new(Role::User, vec![Part::text("hi")]),
