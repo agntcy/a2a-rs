@@ -8,8 +8,8 @@ use a2a::*;
 use a2a_client::transport::{ServiceParams, Transport, TransportFactory};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -95,11 +95,7 @@ impl StdioTransport {
         let hs = handshake::read_handshake(&mut reader).await?;
 
         // Select the first supported variant.
-        let selected = hs
-            .supported_variants
-            .first()
-            .cloned()
-            .unwrap_or_default();
+        let selected = hs.supported_variants.first().cloned().unwrap_or_default();
 
         let ack = HandshakeAck::accept(selected);
         handshake::write_handshake_ack(&mut writer, &ack).await?;
@@ -426,9 +422,13 @@ impl TransportFactory for StdioTransportFactory {
         let url = &iface.url;
         let (program, args) = parse_stdio_url(url)?;
 
-        let transport = StdioTransport::spawn(&program, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), None)
-            .await
-            .map_err(|e| A2AError::internal(format!("failed to spawn stdio transport: {e}")))?;
+        let transport = StdioTransport::spawn(
+            &program,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            None,
+        )
+        .await
+        .map_err(|e| A2AError::internal(format!("failed to spawn stdio transport: {e}")))?;
 
         Ok(Box::new(transport))
     }

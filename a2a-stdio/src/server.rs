@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use a2a::*;
-use a2a_server::middleware::ServiceParams;
 use a2a_server::RequestHandler;
+use a2a_server::middleware::ServiceParams;
 use futures::StreamExt;
 use tokio::io::{AsyncWrite, BufReader};
 
@@ -28,7 +28,13 @@ macro_rules! dispatch_unary {
         let req: $Req = match serde_json::from_value($params) {
             Ok(r) => r,
             Err(e) => {
-                write_error(&mut $writer, $id, error_code::INVALID_PARAMS, &format!("invalid params: {e}")).await?;
+                write_error(
+                    &mut $writer,
+                    $id,
+                    error_code::INVALID_PARAMS,
+                    &format!("invalid params: {e}"),
+                )
+                .await?;
                 continue;
             }
         };
@@ -127,8 +133,8 @@ impl<H: RequestHandler> StdioServer<H> {
         let mut writer = writer;
 
         // Step 1: Send handshake.
-        let session_id = std::env::var("A2A_SESSION_ID")
-            .unwrap_or_else(|_| uuid::Uuid::now_v7().to_string());
+        let session_id =
+            std::env::var("A2A_SESSION_ID").unwrap_or_else(|_| uuid::Uuid::now_v7().to_string());
 
         let hs = Handshake {
             msg_type: "handshake".to_string(),
@@ -173,7 +179,13 @@ impl<H: RequestHandler> StdioServer<H> {
             let rpc_request: JsonRpcRequest = match serde_json::from_value(value) {
                 Ok(r) => r,
                 Err(e) => {
-                    write_error(&mut writer, JsonRpcId::Null, error_code::PARSE_ERROR, &format!("invalid request: {e}")).await?;
+                    write_error(
+                        &mut writer,
+                        JsonRpcId::Null,
+                        error_code::PARSE_ERROR,
+                        &format!("invalid request: {e}"),
+                    )
+                    .await?;
                     continue;
                 }
             };
@@ -185,51 +197,134 @@ impl<H: RequestHandler> StdioServer<H> {
 
             match method.as_str() {
                 "message/send" => {
-                    dispatch_unary!(writer, id, handler, sp, params_value,
-                        SendMessageRequest, send_message);
+                    dispatch_unary!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        SendMessageRequest,
+                        send_message
+                    );
                 }
                 "message/stream" => {
-                    dispatch_streaming!(writer, id, handler, sp, params_value,
-                        SendMessageRequest, send_streaming_message);
+                    dispatch_streaming!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        SendMessageRequest,
+                        send_streaming_message
+                    );
                 }
                 "tasks/get" => {
-                    dispatch_unary!(writer, id, handler, sp, params_value,
-                        GetTaskRequest, get_task);
+                    dispatch_unary!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        GetTaskRequest,
+                        get_task
+                    );
                 }
                 "tasks/list" => {
-                    dispatch_unary!(writer, id, handler, sp, params_value,
-                        ListTasksRequest, list_tasks);
+                    dispatch_unary!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        ListTasksRequest,
+                        list_tasks
+                    );
                 }
                 "tasks/cancel" => {
-                    dispatch_unary!(writer, id, handler, sp, params_value,
-                        CancelTaskRequest, cancel_task);
+                    dispatch_unary!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        CancelTaskRequest,
+                        cancel_task
+                    );
                 }
                 "tasks/subscribe" => {
-                    dispatch_streaming!(writer, id, handler, sp, params_value,
-                        SubscribeToTaskRequest, subscribe_to_task);
+                    dispatch_streaming!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        SubscribeToTaskRequest,
+                        subscribe_to_task
+                    );
                 }
                 "tasks/pushNotificationConfig/create" => {
-                    dispatch_unary!(writer, id, handler, sp, params_value,
-                        CreateTaskPushNotificationConfigRequest, create_push_config);
+                    dispatch_unary!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        CreateTaskPushNotificationConfigRequest,
+                        create_push_config
+                    );
                 }
                 "tasks/pushNotificationConfig/get" => {
-                    dispatch_unary!(writer, id, handler, sp, params_value,
-                        GetTaskPushNotificationConfigRequest, get_push_config);
+                    dispatch_unary!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        GetTaskPushNotificationConfigRequest,
+                        get_push_config
+                    );
                 }
                 "tasks/pushNotificationConfig/list" => {
-                    dispatch_unary!(writer, id, handler, sp, params_value,
-                        ListTaskPushNotificationConfigsRequest, list_push_configs);
+                    dispatch_unary!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        ListTaskPushNotificationConfigsRequest,
+                        list_push_configs
+                    );
                 }
                 "tasks/pushNotificationConfig/delete" => {
-                    dispatch_unary!(writer, id, handler, sp, params_value,
-                        DeleteTaskPushNotificationConfigRequest, delete_push_config);
+                    dispatch_unary!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        DeleteTaskPushNotificationConfigRequest,
+                        delete_push_config
+                    );
                 }
                 "agent/extendedCard" => {
-                    dispatch_unary!(writer, id, handler, sp, params_value,
-                        GetExtendedAgentCardRequest, get_extended_agent_card);
+                    dispatch_unary!(
+                        writer,
+                        id,
+                        handler,
+                        sp,
+                        params_value,
+                        GetExtendedAgentCardRequest,
+                        get_extended_agent_card
+                    );
                 }
                 _ => {
-                    write_error(&mut writer, id, error_code::METHOD_NOT_FOUND, &format!("unknown method: {method}")).await?;
+                    write_error(
+                        &mut writer,
+                        id,
+                        error_code::METHOD_NOT_FOUND,
+                        &format!("unknown method: {method}"),
+                    )
+                    .await?;
                 }
             }
         }

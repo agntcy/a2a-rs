@@ -113,10 +113,7 @@ pub async fn read_handshake<R: AsyncBufRead + Unpin>(
     let value: serde_json::Value = serde_json::from_slice(&frame)
         .map_err(|e| StdioError::HandshakeFailed(format!("invalid JSON: {e}")))?;
 
-    let msg_type = value
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     if msg_type != "handshake" {
         return Err(StdioError::HandshakeFailed(format!(
@@ -157,10 +154,7 @@ pub async fn read_handshake_ack<R: AsyncBufRead + Unpin>(
     let value: serde_json::Value = serde_json::from_slice(&frame)
         .map_err(|e| StdioError::HandshakeFailed(format!("invalid JSON: {e}")))?;
 
-    let msg_type = value
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     if msg_type != "handshakeAck" {
         return Err(StdioError::HandshakeFailed(format!(

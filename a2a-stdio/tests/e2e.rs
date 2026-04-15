@@ -13,10 +13,10 @@ use a2a::event::{StreamResponse, TaskStatusUpdateEvent};
 use a2a::*;
 use a2a_server::RequestHandler;
 use a2a_server::middleware::ServiceParams;
+use a2a_stdio::StdioServer;
 use a2a_stdio::errors::StdioError;
 use a2a_stdio::framing;
 use a2a_stdio::handshake::{self, HandshakeAck};
-use a2a_stdio::StdioServer;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use tokio::io::BufReader;
@@ -362,9 +362,7 @@ async fn setup() -> (
     let handler = Arc::new(TestHandler);
     let server = StdioServer::new(handler);
 
-    let server_handle = tokio::spawn(async move {
-        server.run(server_reader, server_writer).await
-    });
+    let server_handle = tokio::spawn(async move { server.run(server_reader, server_writer).await });
 
     let client = TestClient::connect(client_reader, client_writer)
         .await
@@ -385,8 +383,7 @@ async fn stdio_unary_send_message() {
     let resp = client.call("message/send", params).await;
 
     assert!(resp.error.is_none(), "expected success: {:?}", resp.error);
-    let result: SendMessageResponse =
-        serde_json::from_value(resp.result.unwrap()).unwrap();
+    let result: SendMessageResponse = serde_json::from_value(resp.result.unwrap()).unwrap();
     match result {
         SendMessageResponse::Task(t) => {
             assert_eq!(t.id, "task-1");
@@ -448,8 +445,7 @@ async fn stdio_unary_list_tasks() {
     let resp = client.call("tasks/list", params).await;
 
     assert!(resp.error.is_none());
-    let list: ListTasksResponse =
-        serde_json::from_value(resp.result.unwrap()).unwrap();
+    let list: ListTasksResponse = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(list.tasks.len(), 1);
     assert_eq!(list.tasks[0].id, "task-1");
 }
@@ -482,10 +478,11 @@ async fn stdio_unary_push_config_crud() {
         tenant: None,
     })
     .unwrap();
-    let resp = client.call("tasks/pushNotificationConfig/create", params).await;
+    let resp = client
+        .call("tasks/pushNotificationConfig/create", params)
+        .await;
     assert!(resp.error.is_none());
-    let cfg: TaskPushNotificationConfig =
-        serde_json::from_value(resp.result.unwrap()).unwrap();
+    let cfg: TaskPushNotificationConfig = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(cfg.task_id, "task-1");
 
     // Get
@@ -495,7 +492,9 @@ async fn stdio_unary_push_config_crud() {
         tenant: None,
     })
     .unwrap();
-    let resp = client.call("tasks/pushNotificationConfig/get", params).await;
+    let resp = client
+        .call("tasks/pushNotificationConfig/get", params)
+        .await;
     assert!(resp.error.is_none());
 
     // List
@@ -506,7 +505,9 @@ async fn stdio_unary_push_config_crud() {
         tenant: None,
     })
     .unwrap();
-    let resp = client.call("tasks/pushNotificationConfig/list", params).await;
+    let resp = client
+        .call("tasks/pushNotificationConfig/list", params)
+        .await;
     assert!(resp.error.is_none());
     let list: ListTaskPushNotificationConfigsResponse =
         serde_json::from_value(resp.result.unwrap()).unwrap();
@@ -519,7 +520,9 @@ async fn stdio_unary_push_config_crud() {
         tenant: None,
     })
     .unwrap();
-    let resp = client.call("tasks/pushNotificationConfig/delete", params).await;
+    let resp = client
+        .call("tasks/pushNotificationConfig/delete", params)
+        .await;
     assert!(resp.error.is_none());
 }
 
@@ -527,10 +530,7 @@ async fn stdio_unary_push_config_crud() {
 async fn stdio_unary_get_extended_agent_card() {
     let (_server, mut client) = setup().await;
 
-    let params = serde_json::to_value(&GetExtendedAgentCardRequest {
-        tenant: None,
-    })
-    .unwrap();
+    let params = serde_json::to_value(&GetExtendedAgentCardRequest { tenant: None }).unwrap();
     let resp = client.call("agent/extendedCard", params).await;
 
     assert!(resp.error.is_none());
@@ -605,9 +605,7 @@ async fn stdio_server_exits_on_eof() {
     let handler = Arc::new(TestHandler);
     let server = StdioServer::new(handler);
 
-    let server_handle = tokio::spawn(async move {
-        server.run(server_reader, server_writer).await
-    });
+    let server_handle = tokio::spawn(async move { server.run(server_reader, server_writer).await });
 
     // Complete the handshake, then immediately drop the client.
     {
@@ -618,7 +616,10 @@ async fn stdio_server_exits_on_eof() {
     // client is dropped here — server should see EOF and return Ok(()).
 
     let result = server_handle.await.unwrap();
-    assert!(result.is_ok(), "server should exit cleanly on EOF: {result:?}");
+    assert!(
+        result.is_ok(),
+        "server should exit cleanly on EOF: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -629,9 +630,7 @@ async fn stdio_handshake_reject() {
     let handler = Arc::new(TestHandler);
     let server = StdioServer::new(handler);
 
-    let server_handle = tokio::spawn(async move {
-        server.run(server_reader, server_writer).await
-    });
+    let server_handle = tokio::spawn(async move { server.run(server_reader, server_writer).await });
 
     // Read the server's handshake, then send a reject ack.
     let mut reader = BufReader::new(client_reader);
@@ -643,7 +642,9 @@ async fn stdio_handshake_reject() {
         selected_variant: String::new(),
         accept: false,
     };
-    handshake::write_handshake_ack(&mut writer, &ack).await.unwrap();
+    handshake::write_handshake_ack(&mut writer, &ack)
+        .await
+        .unwrap();
 
     let result = server_handle.await.unwrap();
     assert!(result.is_err(), "server should fail when client rejects");

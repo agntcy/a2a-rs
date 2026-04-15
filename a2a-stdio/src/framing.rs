@@ -23,7 +23,9 @@ const CONTENT_LENGTH_PREFIX: &str = "Content-Length: ";
 ///
 /// Returns the raw JSON bytes of the message body.
 /// Returns `Ok(None)` when the reader reaches EOF (pipe closed).
-pub async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>, StdioError> {
+pub async fn read_frame<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<Vec<u8>>, StdioError> {
     let mut content_length: Option<usize> = None;
 
     // Parse headers until we hit the empty \r\n separator line.
@@ -50,9 +52,8 @@ pub async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Optio
         // Ignore unknown headers (e.g. Content-Type) for forward compatibility.
     }
 
-    let length = content_length.ok_or_else(|| {
-        StdioError::InvalidHeader("missing Content-Length header".to_string())
-    })?;
+    let length = content_length
+        .ok_or_else(|| StdioError::InvalidHeader("missing Content-Length header".to_string()))?;
 
     // Read exactly `length` bytes of body.
     let mut body = vec![0u8; length];
@@ -64,7 +65,10 @@ pub async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Optio
 /// Write a single framed message to the given writer.
 ///
 /// Prepends `Content-Length` and `Content-Type` headers, then flushes.
-pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, body: &[u8]) -> Result<(), StdioError> {
+pub async fn write_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    body: &[u8],
+) -> Result<(), StdioError> {
     let header = format!(
         "Content-Length: {}\r\nContent-Type: application/json\r\n\r\n",
         body.len()
