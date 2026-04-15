@@ -4,5 +4,7 @@ pub mod client;
 pub mod errors;
 pub mod framing;
 pub mod handshake;
+pub mod server;
 
 pub use client::{StdioTransport, StdioTransportFactory};
+pub use server::{StdioServer, serve};
