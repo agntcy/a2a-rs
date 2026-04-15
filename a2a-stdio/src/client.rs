@@ -242,8 +242,22 @@ impl StdioTransport {
                     if let Some(err) = rpc_response.error {
                         let _ = tx.send(Err(A2AError::new(err.code, err.message))).await;
                     } else if let Some(result) = rpc_response.result {
-                        if let Ok(sr) = serde_json::from_value::<StreamResponse>(result) {
-                            let _ = tx.send(Ok(sr)).await;
+                        if !result.is_null() {
+                            match serde_json::from_value::<StreamResponse>(result) {
+                                Ok(sr) => {
+                                    if tx.send(Ok(sr)).await.is_err() {
+                                        // Receiver dropped, no need to continue.
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(Err(A2AError::internal(format!(
+                                            "failed to parse final stream response: {e}"
+                                        ))))
+                                        .await;
+                                }
+                            }
                         }
                     }
                     break;

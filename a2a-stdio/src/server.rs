@@ -155,7 +155,19 @@ impl<H: RequestHandler> StdioServer<H> {
                 None => break, // EOF — client closed stdin.
             };
 
-            let value: serde_json::Value = serde_json::from_slice(&frame)?;
+            let value: serde_json::Value = match serde_json::from_slice(&frame) {
+                Ok(v) => v,
+                Err(e) => {
+                    write_error(
+                        &mut writer,
+                        JsonRpcId::Null,
+                        error_code::PARSE_ERROR,
+                        &format!("invalid json: {e}"),
+                    )
+                    .await?;
+                    continue;
+                }
+            };
 
             // Parse as a JSON-RPC request.
             let rpc_request: JsonRpcRequest = match serde_json::from_value(value) {
