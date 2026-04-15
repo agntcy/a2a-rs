@@ -2,3 +2,4 @@
 // SPDX-License-Identifier: Apache-2.0
 pub mod errors;
 pub mod framing;
+pub mod handshake;
