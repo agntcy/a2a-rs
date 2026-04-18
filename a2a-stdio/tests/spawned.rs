@@ -168,8 +168,9 @@ async fn transport_send_streaming_message() {
         .unwrap();
 
     let mut count = 0;
-    while let Some(item) =
-        tokio::time::timeout(Duration::from_secs(5), stream.next()).await.unwrap()
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
     {
         item.expect("stream item should be Ok");
         count += 1;
@@ -185,11 +186,14 @@ async fn transport_get_task() {
     let svc = ServiceParams::default();
 
     let task = transport
-        .get_task(&svc, &GetTaskRequest {
-            id: "found".to_string(),
-            history_length: None,
-            tenant: None,
-        })
+        .get_task(
+            &svc,
+            &GetTaskRequest {
+                id: "found".to_string(),
+                history_length: None,
+                tenant: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(task.id, "found");
@@ -203,11 +207,14 @@ async fn transport_get_task_returns_server_error() {
     let svc = ServiceParams::default();
 
     let err = transport
-        .get_task(&svc, &GetTaskRequest {
-            id: "missing".to_string(),
-            history_length: None,
-            tenant: None,
-        })
+        .get_task(
+            &svc,
+            &GetTaskRequest {
+                id: "missing".to_string(),
+                history_length: None,
+                tenant: None,
+            },
+        )
         .await
         .unwrap_err();
     // Server returns task_not_found; client should surface it as A2AError.
@@ -222,16 +229,19 @@ async fn transport_list_tasks() {
     let svc = ServiceParams::default();
 
     let resp = transport
-        .list_tasks(&svc, &ListTasksRequest {
-            context_id: None,
-            status: None,
-            page_size: None,
-            page_token: None,
-            history_length: None,
-            status_timestamp_after: None,
-            include_artifacts: None,
-            tenant: None,
-        })
+        .list_tasks(
+            &svc,
+            &ListTasksRequest {
+                context_id: None,
+                status: None,
+                page_size: None,
+                page_token: None,
+                history_length: None,
+                status_timestamp_after: None,
+                include_artifacts: None,
+                tenant: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(resp.tasks.len(), 1);
@@ -245,11 +255,14 @@ async fn transport_cancel_task() {
     let svc = ServiceParams::default();
 
     let task = transport
-        .cancel_task(&svc, &CancelTaskRequest {
-            id: "t1".to_string(),
-            metadata: None,
-            tenant: None,
-        })
+        .cancel_task(
+            &svc,
+            &CancelTaskRequest {
+                id: "t1".to_string(),
+                metadata: None,
+                tenant: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(task.id, "t1");
@@ -264,16 +277,20 @@ async fn transport_subscribe_to_task() {
     let svc = ServiceParams::default();
 
     let mut stream = transport
-        .subscribe_to_task(&svc, &SubscribeToTaskRequest {
-            id: "sub-1".to_string(),
-            tenant: None,
-        })
+        .subscribe_to_task(
+            &svc,
+            &SubscribeToTaskRequest {
+                id: "sub-1".to_string(),
+                tenant: None,
+            },
+        )
         .await
         .unwrap();
 
     let mut count = 0;
-    while let Some(item) =
-        tokio::time::timeout(Duration::from_secs(5), stream.next()).await.unwrap()
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
     {
         item.expect("stream item should be Ok");
         count += 1;
@@ -289,47 +306,59 @@ async fn transport_push_config_crud() {
     let svc = ServiceParams::default();
 
     let cfg = transport
-        .create_push_config(&svc, &CreateTaskPushNotificationConfigRequest {
-            task_id: "t1".to_string(),
-            config: PushNotificationConfig {
-                url: "https://x".to_string(),
-                id: Some("cfg-1".to_string()),
-                token: None,
-                authentication: None,
+        .create_push_config(
+            &svc,
+            &CreateTaskPushNotificationConfigRequest {
+                task_id: "t1".to_string(),
+                config: PushNotificationConfig {
+                    url: "https://x".to_string(),
+                    id: Some("cfg-1".to_string()),
+                    token: None,
+                    authentication: None,
+                },
+                tenant: None,
             },
-            tenant: None,
-        })
+        )
         .await
         .unwrap();
     assert_eq!(cfg.task_id, "t1");
 
     let got = transport
-        .get_push_config(&svc, &GetTaskPushNotificationConfigRequest {
-            task_id: "t1".to_string(),
-            id: "cfg-1".to_string(),
-            tenant: None,
-        })
+        .get_push_config(
+            &svc,
+            &GetTaskPushNotificationConfigRequest {
+                task_id: "t1".to_string(),
+                id: "cfg-1".to_string(),
+                tenant: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(got.config.id.as_deref(), Some("cfg-1"));
 
     let list = transport
-        .list_push_configs(&svc, &ListTaskPushNotificationConfigsRequest {
-            task_id: "t1".to_string(),
-            page_size: None,
-            page_token: None,
-            tenant: None,
-        })
+        .list_push_configs(
+            &svc,
+            &ListTaskPushNotificationConfigsRequest {
+                task_id: "t1".to_string(),
+                page_size: None,
+                page_token: None,
+                tenant: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(list.configs.len(), 1);
 
     transport
-        .delete_push_config(&svc, &DeleteTaskPushNotificationConfigRequest {
-            task_id: "t1".to_string(),
-            id: "cfg-1".to_string(),
-            tenant: None,
-        })
+        .delete_push_config(
+            &svc,
+            &DeleteTaskPushNotificationConfigRequest {
+                task_id: "t1".to_string(),
+                id: "cfg-1".to_string(),
+                tenant: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -366,11 +395,14 @@ async fn call_reports_deserialize_error_for_malformed_result() {
 
     let svc = ServiceParams::default();
     let err = transport
-        .get_task(&svc, &GetTaskRequest {
-            id: "t1".to_string(),
-            history_length: None,
-            tenant: None,
-        })
+        .get_task(
+            &svc,
+            &GetTaskRequest {
+                id: "t1".to_string(),
+                history_length: None,
+                tenant: None,
+            },
+        )
         .await
         .unwrap_err();
     assert!(
@@ -475,7 +507,102 @@ async fn factory_propagates_spawn_failure_for_missing_program() {
         Ok(_) => panic!("factory should fail when the program cannot be spawned"),
     };
     assert!(
-        err.message.to_lowercase().contains("spawn") || err.message.to_lowercase().contains("stdio"),
+        err.message.to_lowercase().contains("spawn")
+            || err.message.to_lowercase().contains("stdio"),
         "unexpected error message: {err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Streaming background-reader error paths
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn streaming_parse_frame_error_is_surfaced() {
+    let transport = StdioTransport::spawn(HELPER, &["stream-bad-frame"], None)
+        .await
+        .expect("stream-bad-frame spawn should succeed");
+    let svc = ServiceParams::default();
+
+    let mut stream = transport
+        .send_streaming_message(&svc, &sample_send_message_request("s"))
+        .await
+        .unwrap();
+
+    let item = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("stream should yield within timeout")
+        .expect("stream should not end before yielding the parse error");
+    let err = item.expect_err("first item should be a parse-frame error");
+    assert!(
+        err.message.to_lowercase().contains("parse frame"),
+        "unexpected error: {err:?}"
+    );
+
+    shutdown(transport).await;
+}
+
+#[tokio::test]
+async fn streaming_bad_notification_is_surfaced_then_stream_completes() {
+    let transport = StdioTransport::spawn(HELPER, &["stream-bad-notification"], None)
+        .await
+        .expect("stream-bad-notification spawn should succeed");
+    let svc = ServiceParams::default();
+
+    let mut stream = transport
+        .send_streaming_message(&svc, &sample_send_message_request("s"))
+        .await
+        .unwrap();
+
+    let mut saw_parse_event_err = false;
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+    {
+        if let Err(e) = item {
+            if e.message.to_lowercase().contains("parse streaming event") {
+                saw_parse_event_err = true;
+            }
+        }
+    }
+    assert!(
+        saw_parse_event_err,
+        "expected to observe a 'parse streaming event' error"
+    );
+
+    shutdown(transport).await;
+}
+
+#[tokio::test]
+async fn streaming_bad_final_response_is_surfaced() {
+    let transport = StdioTransport::spawn(HELPER, &["stream-bad-final"], None)
+        .await
+        .expect("stream-bad-final spawn should succeed");
+    let svc = ServiceParams::default();
+
+    let mut stream = transport
+        .send_streaming_message(&svc, &sample_send_message_request("s"))
+        .await
+        .unwrap();
+
+    let mut saw_final_parse_err = false;
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+    {
+        if let Err(e) = item {
+            if e.message
+                .to_lowercase()
+                .contains("failed to parse final stream response")
+            {
+                saw_final_parse_err = true;
+            }
+        }
+    }
+    assert!(
+        saw_final_parse_err,
+        "expected to observe a 'failed to parse final stream response' error"
+    );
+
+    shutdown(transport).await;
 }

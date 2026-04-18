@@ -112,17 +112,20 @@ impl StdioTransport {
 
         // Server sends handshake first. Bound the wait so a hung subprocess
         // does not block the spawn indefinitely.
-        let hs = match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake::read_handshake(&mut reader)).await {
-            Ok(res) => res?,
-            Err(_) => {
-                // Best-effort: kill the subprocess so it does not linger.
-                let _ = child.kill().await;
-                return Err(StdioError::HandshakeFailed(format!(
-                    "timed out waiting for handshake after {:?}",
-                    HANDSHAKE_TIMEOUT
-                )));
-            }
-        };
+        let hs =
+            match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake::read_handshake(&mut reader))
+                .await
+            {
+                Ok(res) => res?,
+                Err(_) => {
+                    // Best-effort: kill the subprocess so it does not linger.
+                    let _ = child.kill().await;
+                    return Err(StdioError::HandshakeFailed(format!(
+                        "timed out waiting for handshake after {:?}",
+                        HANDSHAKE_TIMEOUT
+                    )));
+                }
+            };
 
         // Select the first supported variant.
         let selected = hs.supported_variants.first().cloned().unwrap_or_default();

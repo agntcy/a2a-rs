@@ -756,9 +756,7 @@ async fn stdio_streaming_invalid_params_returns_error() {
 async fn stdio_subscribe_invalid_params_returns_error() {
     let (_server, mut client) = setup().await;
 
-    let resp = client
-        .call("tasks/subscribe", serde_json::json!({}))
-        .await;
+    let resp = client.call("tasks/subscribe", serde_json::json!({})).await;
     let err = resp.error.expect("expected INVALID_PARAMS");
     assert_eq!(err.code, error_code::INVALID_PARAMS);
 }
@@ -794,4 +792,3 @@ async fn stdio_get_task_handler_error_returns_error_response() {
     let err = resp.error.expect("expected handler error");
     assert!(err.message.to_lowercase().contains("missing") || err.code != 0);
 }
-
