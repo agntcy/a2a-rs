@@ -19,6 +19,13 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWr
 
 const CONTENT_LENGTH_PREFIX: &str = "Content-Length: ";
 
+/// Maximum size (in bytes) accepted for a single framed message body.
+///
+/// Bounds memory allocated from a single peer-supplied `Content-Length` header
+/// so a buggy or malicious subprocess cannot trigger a huge allocation by
+/// advertising an unrealistic body size.
+pub const MAX_FRAME_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
 /// Read a single framed message from the given reader.
 ///
 /// Returns the raw JSON bytes of the message body.
@@ -54,6 +61,12 @@ pub async fn read_frame<R: AsyncBufRead + Unpin>(
 
     let length = content_length
         .ok_or_else(|| StdioError::InvalidHeader("missing Content-Length header".to_string()))?;
+
+    if length > MAX_FRAME_SIZE {
+        return Err(StdioError::InvalidHeader(format!(
+            "Content-Length {length} exceeds maximum frame size {MAX_FRAME_SIZE}"
+        )));
+    }
 
     // Read exactly `length` bytes of body.
     let mut body = vec![0u8; length];
@@ -145,5 +158,19 @@ mod tests {
         let mut reader = BufReader::new(Cursor::new(raw.to_vec()));
         let result = read_frame(&mut reader).await.unwrap().unwrap();
         assert_eq!(result, b"hi");
+    }
+
+    #[tokio::test]
+    async fn test_rejects_oversized_content_length() {
+        let too_big = MAX_FRAME_SIZE + 1;
+        let raw = format!("Content-Length: {too_big}\r\n\r\n");
+        let mut reader = BufReader::new(Cursor::new(raw.into_bytes()));
+        let err = read_frame(&mut reader).await.unwrap_err();
+        match err {
+            StdioError::InvalidHeader(msg) => {
+                assert!(msg.contains("exceeds maximum frame size"), "got: {msg}");
+            }
+            other => panic!("expected InvalidHeader, got {other:?}"),
+        }
     }
 }

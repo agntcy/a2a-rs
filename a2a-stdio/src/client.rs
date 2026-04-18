@@ -18,7 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::errors::StdioError;
 use crate::framing;
-use crate::handshake::{self, Handshake, HandshakeAck};
+use crate::handshake::{self, HandshakeAck};
 
 // ---------------------------------------------------------------------------
 // Stdio method names (slash-separated, per maintainer design doc)
@@ -53,8 +53,6 @@ pub struct StdioTransport {
     writer: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     /// Reader from the child's stdout (framed JSON-RPC).
     reader: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>,
-    /// The handshake received from the server.
-    _handshake: Handshake,
 }
 
 impl StdioTransport {
@@ -100,11 +98,14 @@ impl StdioTransport {
         let ack = HandshakeAck::accept(selected);
         handshake::write_handshake_ack(&mut writer, &ack).await?;
 
+        // Handshake content (selected variant, features) is currently unused
+        // beyond the accept/reject decision; drop it.
+        let _ = hs;
+
         Ok(StdioTransport {
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
             reader: Arc::new(Mutex::new(reader)),
-            _handshake: hs,
         })
     }
 
@@ -440,6 +441,13 @@ impl TransportFactory for StdioTransportFactory {
 /// - `stdio:///path/to/binary` → program="/path/to/binary", args=[]
 /// - `stdio:///path/to/binary?arg1&arg2` → program="/path/to/binary", args=["arg1", "arg2"]
 /// - `/path/to/binary arg1 arg2` → program="/path/to/binary", args=["arg1", "arg2"]
+///
+/// # Limitations
+///
+/// Arguments in the `stdio://` form are split on `&` and the path is split on
+/// the first `?`. As a result, individual arguments cannot themselves contain
+/// the `&` or `?` characters. For commands that need such arguments, use the
+/// plain `program arg1 arg2` form instead.
 fn parse_stdio_url(url: &str) -> Result<(String, Vec<String>), A2AError> {
     if let Some(rest) = url.strip_prefix("stdio://") {
         let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
