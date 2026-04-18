@@ -11,6 +11,12 @@ rust-version.workspace = true
 [lib]
 name = "a2a_stdio"
 
+# Test-only helper subprocess used by integration tests in tests/spawned.rs.
+# Not part of the public surface; kept under tests/bin/ to make that explicit.
+[[bin]]
+name = "stdio_test_helper"
+path = "tests/bin/stdio_test_helper.rs"
+
 [dependencies]
 a2a = { workspace = true }
 a2a-client = { workspace = true }

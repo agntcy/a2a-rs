@@ -11,6 +11,7 @@ use futures::stream::BoxStream;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -19,6 +20,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::errors::StdioError;
 use crate::framing;
 use crate::handshake::{self, HandshakeAck};
+
+/// How long to wait for the subprocess to send its initial handshake.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to wait for the subprocess to exit after closing its stdin
+/// before forcibly killing it.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Stdio method names (slash-separated, per maintainer design doc)
@@ -46,6 +54,16 @@ mod stdio_methods {
 ///
 /// The client spawns the child process, performs the handshake, then sends
 /// JSON-RPC requests over the child's stdin and reads responses from stdout.
+/// A transport that communicates with an agent subprocess over stdio pipes.
+///
+/// The client spawns the child process, performs the handshake, then sends
+/// JSON-RPC requests over the child's stdin and reads responses from stdout.
+///
+/// # Concurrency
+///
+/// Each call to [`Transport`] takes a request-level lock that is held across
+/// the full write/read cycle. Concurrent calls therefore block rather than
+/// race on the underlying pipes — responses are not multiplexed by `id`.
 pub struct StdioTransport {
     /// The child process. Held for lifetime management.
     child: Arc<Mutex<Child>>,
@@ -53,6 +71,9 @@ pub struct StdioTransport {
     writer: Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     /// Reader from the child's stdout (framed JSON-RPC).
     reader: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>,
+    /// Serializes full request/response cycles so concurrent callers do not
+    /// interleave on the underlying pipes.
+    request_lock: Arc<Mutex<()>>,
 }
 
 impl StdioTransport {
@@ -89,8 +110,19 @@ impl StdioTransport {
         let mut reader = BufReader::new(stdout);
         let mut writer: Box<dyn AsyncWrite + Send + Unpin> = Box::new(stdin);
 
-        // Server sends handshake first.
-        let hs = handshake::read_handshake(&mut reader).await?;
+        // Server sends handshake first. Bound the wait so a hung subprocess
+        // does not block the spawn indefinitely.
+        let hs = match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake::read_handshake(&mut reader)).await {
+            Ok(res) => res?,
+            Err(_) => {
+                // Best-effort: kill the subprocess so it does not linger.
+                let _ = child.kill().await;
+                return Err(StdioError::HandshakeFailed(format!(
+                    "timed out waiting for handshake after {:?}",
+                    HANDSHAKE_TIMEOUT
+                )));
+            }
+        };
 
         // Select the first supported variant.
         let selected = hs.supported_variants.first().cloned().unwrap_or_default();
@@ -106,6 +138,7 @@ impl StdioTransport {
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
             reader: Arc::new(Mutex::new(reader)),
+            request_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -127,6 +160,10 @@ impl StdioTransport {
 
         let body = serde_json::to_vec(&request)
             .map_err(|e| A2AError::internal(format!("serialize request: {e}")))?;
+
+        // Hold the request lock across the full write+read cycle so concurrent
+        // callers do not interleave on the underlying pipes.
+        let _guard = self.request_lock.lock().await;
 
         // Write request.
         {
@@ -183,6 +220,11 @@ impl StdioTransport {
         let body = serde_json::to_vec(&request)
             .map_err(|e| A2AError::internal(format!("serialize request: {e}")))?;
 
+        // Acquire the request lock for the entire stream lifetime so concurrent
+        // callers do not interleave on the underlying pipes. The owned guard is
+        // moved into the background task and dropped when the stream ends.
+        let request_guard = Arc::clone(&self.request_lock).lock_owned().await;
+
         // Write request.
         {
             let mut writer = self.writer.lock().await;
@@ -197,6 +239,9 @@ impl StdioTransport {
         let reader = Arc::clone(&self.reader);
 
         tokio::spawn(async move {
+            // Tie the lock guard to this task so it is released when the stream
+            // terminates (either at the final response or on error).
+            let _request_guard = request_guard;
             loop {
                 let frame = {
                     let mut r = reader.lock().await;
@@ -386,12 +431,23 @@ impl Transport for StdioTransport {
                 .map_err(|e| A2AError::internal(format!("shutdown stdin: {e}")))?;
         }
 
-        // Wait for child to exit.
+        // Wait for the child to exit, but do not block forever — fall back
+        // to killing it if it does not exit within `CLOSE_TIMEOUT`.
         let mut child = self.child.lock().await;
-        child
-            .wait()
-            .await
-            .map_err(|e| A2AError::internal(format!("wait for child: {e}")))?;
+        match tokio::time::timeout(CLOSE_TIMEOUT, child.wait()).await {
+            Ok(res) => {
+                res.map_err(|e| A2AError::internal(format!("wait for child: {e}")))?;
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                // Reap the killed child so it does not become a zombie.
+                let _ = child.wait().await;
+                return Err(A2AError::internal(format!(
+                    "subprocess did not exit within {:?}; killed",
+                    CLOSE_TIMEOUT
+                )));
+            }
+        }
 
         Ok(())
     }
