@@ -189,9 +189,12 @@ impl StdioTransport {
             return Err(A2AError::new(err.code, err.message));
         }
 
-        let result = rpc_response
-            .result
-            .ok_or_else(|| A2AError::internal("response missing result"))?;
+        // For methods returning `()` the JSON-RPC response carries
+        // `"result": null`, which serde deserializes into `None` for
+        // `Option<Value>`. Treat a missing/null result as `Value::Null`
+        // so unit responses round-trip correctly while non-null results
+        // still flow through normal deserialization.
+        let result = rpc_response.result.unwrap_or(serde_json::Value::Null);
 
         serde_json::from_value(result)
             .map_err(|e| A2AError::internal(format!("deserialize result: {e}")))

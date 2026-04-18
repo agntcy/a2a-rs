@@ -4,26 +4,30 @@
 //! Test-only subprocess helper for `agntcy-a2a-stdio` integration tests.
 //!
 //! This binary is spawned by tests in `tests/spawned.rs` to exercise paths
-//! that require a real child process (handshake timeout, close timeout,
-//! request serialization). It is not part of the public API.
+//! that require a real child process. It is not part of the public API.
 //!
 //! Modes (selected via the first CLI argument):
 //!
 //! - `hang-no-handshake` — block forever; never write the handshake.
 //! - `handshake-then-hang` — write handshake, read ack, then block forever
 //!   (ignores stdin EOF so `child.wait()` hangs).
-//! - `slow-echo` — run a `StdioServer` whose `send_message` handler sleeps
-//!   `STDIO_TEST_DELAY_MS` ms (default 200) before echoing the request's
-//!   `task_id` back as a completed `Task`.
+//! - `full-echo` — run a `StdioServer` that implements all 11
+//!   `RequestHandler` methods with canned data. `send_message` sleeps
+//!   `STDIO_TEST_DELAY_MS` ms (default 200) before responding so the
+//!   request-serialization test can race two calls.
+//! - `bad-response` — manually write a JSON-RPC response whose `result`
+//!   cannot be deserialized into the expected type. Used to exercise the
+//!   client-side `deserialize result` error branch.
 
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
-use a2a::event::StreamResponse;
+use a2a::event::{StreamResponse, TaskStatusUpdateEvent};
 use a2a::*;
 use a2a_server::RequestHandler;
 use a2a_server::middleware::ServiceParams;
+use a2a_stdio::framing;
 use a2a_stdio::handshake::{Handshake, read_handshake_ack};
 use a2a_stdio::{StdioServer, handshake};
 use async_trait::async_trait;
@@ -37,7 +41,8 @@ async fn main() {
     match mode.as_str() {
         "hang-no-handshake" => hang_no_handshake().await,
         "handshake-then-hang" => handshake_then_hang().await,
-        "slow-echo" => slow_echo().await,
+        "full-echo" => full_echo().await,
+        "bad-response" => bad_response().await,
         other => {
             eprintln!("stdio_test_helper: unknown mode {other:?}");
             std::process::exit(2);
@@ -45,79 +50,125 @@ async fn main() {
     }
 }
 
-/// Block forever without writing anything. Drives `HANDSHAKE_TIMEOUT`.
 async fn hang_no_handshake() {
     std::future::pending::<()>().await;
 }
 
-/// Complete the handshake, then block forever ignoring stdin EOF.
-/// Drives `CLOSE_TIMEOUT` + kill fallback in the client.
 async fn handshake_then_hang() {
     let mut writer = stdout();
     let mut reader = BufReader::new(stdin());
 
-    let hs = Handshake::new(
-        "test-session".to_string(),
-        vec!["a2a/v1".to_string()],
-    );
+    let hs = Handshake::new("test-session".to_string(), vec!["a2a/v1".to_string()]);
     handshake::write_handshake(&mut writer, &hs).await.unwrap();
-    // Best-effort read of the ack; if it fails just hang anyway.
     let _ = read_handshake_ack(&mut reader).await;
 
     std::future::pending::<()>().await;
 }
 
-/// Run a `StdioServer` with a handler that sleeps before responding to
-/// `message/send`. Used to verify concurrent client calls are serialized.
-async fn slow_echo() {
+async fn full_echo() {
     let delay_ms: u64 = env::var("STDIO_TEST_DELAY_MS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
-    let handler = Arc::new(SlowHandler {
-        delay: Duration::from_millis(delay_ms),
+    let handler = Arc::new(EchoHandler {
+        send_delay: Duration::from_millis(delay_ms),
     });
     let server = StdioServer::new(handler);
     let _ = server.run(stdin(), stdout()).await;
 }
 
-struct SlowHandler {
-    delay: Duration,
+/// Performs the handshake, then on the first request writes back a JSON-RPC
+/// response whose `result` is a JSON string instead of the expected object.
+/// Exercises the client's `deserialize result` error path.
+async fn bad_response() {
+    let mut writer = stdout();
+    let mut reader = BufReader::new(stdin());
+
+    let hs = Handshake::new("test-session".to_string(), vec!["a2a/v1".to_string()]);
+    handshake::write_handshake(&mut writer, &hs).await.unwrap();
+    let _ = read_handshake_ack(&mut reader).await;
+
+    let frame = framing::read_frame(&mut reader).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+    let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+
+    let resp = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": "this-is-not-a-task-object",
+    });
+    let body = serde_json::to_vec(&resp).unwrap();
+    framing::write_frame(&mut writer, &body).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// EchoHandler — canned responses for all 11 RequestHandler methods.
+// ---------------------------------------------------------------------------
+
+struct EchoHandler {
+    send_delay: Duration,
+}
+
+fn echo_task(id: &str, state: TaskState) -> Task {
+    Task {
+        id: id.to_string(),
+        context_id: "ctx".to_string(),
+        status: TaskStatus {
+            state,
+            message: None,
+            timestamp: None,
+        },
+        artifacts: None,
+        history: None,
+        metadata: None,
+    }
 }
 
 #[async_trait]
-impl RequestHandler for SlowHandler {
+impl RequestHandler for EchoHandler {
     async fn send_message(
         &self,
         _params: &ServiceParams,
         req: SendMessageRequest,
     ) -> Result<SendMessageResponse, A2AError> {
-        sleep(self.delay).await;
+        sleep(self.send_delay).await;
         let task_id = req
             .message
             .task_id
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
-        Ok(SendMessageResponse::Task(Task {
-            id: task_id,
-            context_id: "ctx".to_string(),
-            status: TaskStatus {
-                state: TaskState::Completed,
-                message: None,
-                timestamp: None,
-            },
-            artifacts: None,
-            history: None,
-            metadata: None,
-        }))
+        Ok(SendMessageResponse::Task(echo_task(
+            &task_id,
+            TaskState::Completed,
+        )))
     }
 
     async fn send_streaming_message(
         &self,
         _params: &ServiceParams,
-        _req: SendMessageRequest,
+        req: SendMessageRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        Ok(Box::pin(stream::empty()))
+        let task_id = req
+            .message
+            .task_id
+            .clone()
+            .unwrap_or_else(|| "stream-task".to_string());
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+                task_id: task_id.clone(),
+                context_id: "ctx".to_string(),
+                status: TaskStatus {
+                    state: TaskState::Working,
+                    message: None,
+                    timestamp: None,
+                },
+                metadata: None,
+            })),
+            Ok(StreamResponse::Task(echo_task(
+                &task_id,
+                TaskState::Completed,
+            ))),
+        ])))
     }
 
     async fn get_task(
@@ -125,7 +176,10 @@ impl RequestHandler for SlowHandler {
         _params: &ServiceParams,
         req: GetTaskRequest,
     ) -> Result<Task, A2AError> {
-        Err(A2AError::task_not_found(&req.id))
+        if req.id == "missing" {
+            return Err(A2AError::task_not_found(&req.id));
+        }
+        Ok(echo_task(&req.id, TaskState::Completed))
     }
 
     async fn list_tasks(
@@ -134,10 +188,10 @@ impl RequestHandler for SlowHandler {
         _req: ListTasksRequest,
     ) -> Result<ListTasksResponse, A2AError> {
         Ok(ListTasksResponse {
-            tasks: vec![],
-            next_page_token: String::new(),
-            page_size: 0,
-            total_size: 0,
+            tasks: vec![echo_task("task-1", TaskState::Completed)],
+            next_page_token: "next".to_string(),
+            page_size: 1,
+            total_size: 1,
         })
     }
 
@@ -146,7 +200,7 @@ impl RequestHandler for SlowHandler {
         _params: &ServiceParams,
         req: CancelTaskRequest,
     ) -> Result<Task, A2AError> {
-        Err(A2AError::task_not_found(&req.id))
+        Ok(echo_task(&req.id, TaskState::Canceled))
     }
 
     async fn subscribe_to_task(
@@ -154,7 +208,22 @@ impl RequestHandler for SlowHandler {
         _params: &ServiceParams,
         req: SubscribeToTaskRequest,
     ) -> Result<BoxStream<'static, Result<StreamResponse, A2AError>>, A2AError> {
-        Err(A2AError::task_not_found(&req.id))
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+                task_id: req.id.clone(),
+                context_id: "ctx".to_string(),
+                status: TaskStatus {
+                    state: TaskState::Working,
+                    message: None,
+                    timestamp: None,
+                },
+                metadata: None,
+            })),
+            Ok(StreamResponse::Task(echo_task(
+                &req.id,
+                TaskState::Completed,
+            ))),
+        ])))
     }
 
     async fn create_push_config(
@@ -174,16 +243,34 @@ impl RequestHandler for SlowHandler {
         _params: &ServiceParams,
         req: GetTaskPushNotificationConfigRequest,
     ) -> Result<TaskPushNotificationConfig, A2AError> {
-        Err(A2AError::task_not_found(&req.task_id))
+        Ok(TaskPushNotificationConfig {
+            task_id: req.task_id,
+            tenant: req.tenant,
+            config: PushNotificationConfig {
+                url: "https://example.com/cb".to_string(),
+                id: Some(req.id),
+                token: None,
+                authentication: None,
+            },
+        })
     }
 
     async fn list_push_configs(
         &self,
         _params: &ServiceParams,
-        _req: ListTaskPushNotificationConfigsRequest,
+        req: ListTaskPushNotificationConfigsRequest,
     ) -> Result<ListTaskPushNotificationConfigsResponse, A2AError> {
         Ok(ListTaskPushNotificationConfigsResponse {
-            configs: vec![],
+            configs: vec![TaskPushNotificationConfig {
+                task_id: req.task_id,
+                tenant: req.tenant,
+                config: PushNotificationConfig {
+                    url: "https://example.com/cb".to_string(),
+                    id: Some("cfg-1".to_string()),
+                    token: None,
+                    authentication: None,
+                },
+            }],
             next_page_token: None,
         })
     }
@@ -201,6 +288,21 @@ impl RequestHandler for SlowHandler {
         _params: &ServiceParams,
         _req: GetExtendedAgentCardRequest,
     ) -> Result<AgentCard, A2AError> {
-        Err(A2AError::internal("not supported"))
+        Ok(AgentCard {
+            name: "echo-agent".to_string(),
+            description: "test".to_string(),
+            version: "0.0.1".to_string(),
+            supported_interfaces: vec![],
+            capabilities: AgentCapabilities::default(),
+            default_input_modes: vec!["text/plain".to_string()],
+            default_output_modes: vec!["text/plain".to_string()],
+            skills: vec![],
+            provider: None,
+            documentation_url: None,
+            icon_url: None,
+            security_schemes: None,
+            security_requirements: None,
+            signatures: None,
+        })
     }
 }
