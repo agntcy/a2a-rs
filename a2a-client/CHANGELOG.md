@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.14](https://github.com/a2aproject/a2a-rs/compare/a2a-client-lf-v0.1.13...a2a-client-lf-v0.1.14) - 2026-04-20
+
+### Added
+
+- use rustls everywhere and expose TLS backend selection via feature flags ([#47](https://github.com/a2aproject/a2a-rs/pull/47))
+
 ## [0.1.13](https://github.com/a2aproject/a2a-rs/compare/agntcy-a2a-client-v0.1.12...agntcy-a2a-client-v0.1.13) - 2026-04-06
 
 ### Fixed
