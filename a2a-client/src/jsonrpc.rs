@@ -137,9 +137,21 @@ fn parse_sse_stream(
     stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
     let mapped = stream::unfold(
-        (Box::pin(stream), String::new()),
-        |(mut stream, mut buf)| async move {
+        (
+            Box::pin(stream),
+            String::new(),
+            std::collections::VecDeque::<Result<StreamResponse, A2AError>>::new(),
+        ),
+        |(mut stream, mut buf, mut pending)| async move {
             loop {
+                // Drain already-parsed events BEFORE reading more bytes.
+                // Otherwise a single byte chunk carrying N complete SSE events
+                // would deliver only the first, and the remaining N-1 would be
+                // silently dropped if the connection closed before another
+                // chunk arrived (e.g. rapid final bursts with immediate close).
+                if let Some(item) = pending.pop_front() {
+                    return Some((item, (stream, buf, pending)));
+                }
                 match stream.next().await {
                     Some(Ok(chunk)) => {
                         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -176,47 +188,38 @@ fn parse_sse_stream(
                             match serde_json::from_str::<JsonRpcResponse>(&data) {
                                 Ok(rpc_resp) => {
                                     if let Some(err) = rpc_resp.error {
-                                        return Some((
-                                            Err(A2AError::new(err.code, err.message)),
-                                            (stream, buf),
-                                        ));
+                                        pending.push_back(Err(A2AError::new(
+                                            err.code,
+                                            err.message,
+                                        )));
+                                        continue;
                                     }
                                     if let Some(result) = rpc_resp.result {
                                         match protojson_conv::from_value::<StreamResponse>(result) {
-                                            Ok(sr) => return Some((Ok(sr), (stream, buf))),
-                                            Err(e) => {
-                                                return Some((
-                                                    Err(A2AError::internal(format!(
-                                                        "SSE parse error: {e}"
-                                                    ))),
-                                                    (stream, buf),
-                                                ));
-                                            }
+                                            Ok(sr) => pending.push_back(Ok(sr)),
+                                            Err(e) => pending.push_back(Err(A2AError::internal(
+                                                format!("SSE parse error: {e}"),
+                                            ))),
                                         }
                                     }
                                 }
                                 Err(_) => {
                                     // Try parsing directly as StreamResponse
                                     match protojson_conv::from_str::<StreamResponse>(&data) {
-                                        Ok(sr) => return Some((Ok(sr), (stream, buf))),
-                                        Err(e) => {
-                                            return Some((
-                                                Err(A2AError::internal(format!(
-                                                    "SSE parse error: {e}"
-                                                ))),
-                                                (stream, buf),
-                                            ));
-                                        }
+                                        Ok(sr) => pending.push_back(Ok(sr)),
+                                        Err(e) => pending.push_back(Err(A2AError::internal(
+                                            format!("SSE parse error: {e}"),
+                                        ))),
                                     }
                                 }
                             }
                         }
+                        // Loop back: pending may now hold events — drain before next read.
                     }
                     Some(Err(e)) => {
-                        return Some((
-                            Err(A2AError::internal(format!("SSE stream error: {e}"))),
-                            (stream, buf),
-                        ));
+                        pending.push_back(Err(A2AError::internal(format!(
+                            "SSE stream error: {e}"
+                        ))));
                     }
                     None => return None,
                 }
@@ -234,9 +237,19 @@ pub(crate) fn parse_sse_stream_rest(
     stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
     let mapped = stream::unfold(
-        (Box::pin(stream), String::new()),
-        |(mut stream, mut buf)| async move {
+        (
+            Box::pin(stream),
+            String::new(),
+            std::collections::VecDeque::<Result<StreamResponse, A2AError>>::new(),
+        ),
+        |(mut stream, mut buf, mut pending)| async move {
             loop {
+                // Drain already-parsed events before reading more bytes; see
+                // parse_sse_stream for the rationale (burst-then-close drops
+                // all but the first event without this).
+                if let Some(item) = pending.pop_front() {
+                    return Some((item, (stream, buf, pending)));
+                }
                 match stream.next().await {
                     Some(Ok(chunk)) => {
                         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -268,21 +281,17 @@ pub(crate) fn parse_sse_stream_rest(
                             }
 
                             match protojson_conv::from_str::<StreamResponse>(&data) {
-                                Ok(sr) => return Some((Ok(sr), (stream, buf))),
-                                Err(e) => {
-                                    return Some((
-                                        Err(A2AError::internal(format!("SSE parse error: {e}"))),
-                                        (stream, buf),
-                                    ));
-                                }
+                                Ok(sr) => pending.push_back(Ok(sr)),
+                                Err(e) => pending.push_back(Err(A2AError::internal(format!(
+                                    "SSE parse error: {e}"
+                                )))),
                             }
                         }
                     }
                     Some(Err(e)) => {
-                        return Some((
-                            Err(A2AError::internal(format!("SSE stream error: {e}"))),
-                            (stream, buf),
-                        ));
+                        pending.push_back(Err(A2AError::internal(format!(
+                            "SSE stream error: {e}"
+                        ))));
                     }
                     None => return None,
                 }
@@ -764,6 +773,92 @@ mod tests {
         let stream = byte_stream(vec![chunk1, chunk2]);
         let items: Vec<_> = parse_sse_stream_rest(stream).collect().await;
         assert_eq!(items.len(), 2);
+        assert!(items[0].is_ok());
+        assert!(items[1].is_ok());
+    }
+
+    /// Regression: multiple complete SSE events packed into a **single** byte
+    /// chunk must all be delivered, even when the upstream byte stream ends
+    /// immediately after that chunk.
+    ///
+    /// Prior to the drain-buffer fix, `parse_sse_stream` returned after parsing
+    /// the first event in the buffer and only re-polled the byte stream on the
+    /// next consumer call. If the byte stream was already exhausted (e.g. the
+    /// server closed the connection after a final burst of events), the
+    /// remaining events sitting in the parser buffer were silently dropped —
+    /// commonly losing the terminal `TASK_STATE_COMPLETED` `Task` event.
+    #[tokio::test]
+    async fn test_parse_sse_stream_multiple_events_single_chunk() {
+        let make_status = |state| {
+            StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+                task_id: "t1".into(),
+                context_id: "c1".into(),
+                status: TaskStatus {
+                    state,
+                    message: None,
+                    timestamp: None,
+                },
+                metadata: None,
+            })
+        };
+        let rpc_payload = |sr: StreamResponse, id: i64| -> String {
+            let result = protojson_conv::to_value(&sr).unwrap();
+            serde_json::to_string(&JsonRpcResponse::success(JsonRpcId::Number(id), result))
+                .unwrap()
+        };
+        let combined = format!(
+            "data: {}\n\ndata: {}\n\n",
+            rpc_payload(make_status(TaskState::Working), 1),
+            rpc_payload(make_status(TaskState::Completed), 2),
+        );
+
+        // All events in one chunk; stream ends immediately after.
+        let stream = byte_stream(vec![combined]);
+        let items: Vec<_> = parse_sse_stream(stream).collect().await;
+        assert_eq!(
+            items.len(),
+            2,
+            "both events must be delivered even when packed into a single \
+             byte chunk followed by end-of-stream; got {items:?}",
+        );
+        assert!(items[0].is_ok());
+        assert!(items[1].is_ok());
+    }
+
+    /// REST-binding counterpart of
+    /// [`test_parse_sse_stream_multiple_events_single_chunk`]. Same
+    /// drain-buffer bug existed in `parse_sse_stream_rest`.
+    #[tokio::test]
+    async fn test_parse_sse_stream_rest_multiple_events_single_chunk() {
+        let make_status = |state| {
+            StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+                task_id: "t1".into(),
+                context_id: "c1".into(),
+                status: TaskStatus {
+                    state,
+                    message: None,
+                    timestamp: None,
+                },
+                metadata: None,
+            })
+        };
+        let encode = |sr: StreamResponse| -> String {
+            serde_json::to_string(&protojson_conv::to_value(&sr).unwrap()).unwrap()
+        };
+        let combined = format!(
+            "data: {}\n\ndata: {}\n\n",
+            encode(make_status(TaskState::Working)),
+            encode(make_status(TaskState::Completed)),
+        );
+
+        let stream = byte_stream(vec![combined]);
+        let items: Vec<_> = parse_sse_stream_rest(stream).collect().await;
+        assert_eq!(
+            items.len(),
+            2,
+            "both events must be delivered even when packed into a single \
+             byte chunk followed by end-of-stream; got {items:?}",
+        );
         assert!(items[0].is_ok());
         assert!(items[1].is_ok());
     }
