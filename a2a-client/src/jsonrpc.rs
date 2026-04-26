@@ -5,6 +5,7 @@ use a2a_pb::protojson_conv::{self, ProtoJsonPayload};
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use reqwest::Client;
+use std::collections::VecDeque;
 
 use crate::push_config_compat::{
     deserialize_list_task_push_notification_configs_response,
@@ -132,38 +133,57 @@ impl JsonRpcTransport {
     }
 }
 
-/// Parse an SSE byte stream into StreamResponse events.
-fn parse_sse_stream(
+/// Find the end of an SSE event boundary in a byte buffer.
+///
+/// SSE line terminators per https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation:
+/// `\n\n`, `\r\r`, and `\r\n\r\n` are all valid event separators.
+fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+    for i in 0..buf.len().saturating_sub(1) {
+        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
+            return Some((i, i + 2));
+        }
+        if buf[i] == b'\r' && buf[i + 1] == b'\r' {
+            return Some((i, i + 2));
+        }
+        if i + 3 < buf.len() && &buf[i..i + 4] == b"\r\n\r\n" {
+            return Some((i, i + 4));
+        }
+    }
+    None
+}
+
+/// Shared SSE byte-stream parser that abstracts over the event-parse callback.
+///
+/// `parse_event` is invoked on each complete `\n\n`/`\r\r`/`\r\n\r\n`-delimited
+/// event; it should return `Some(result)` to emit the event or `None` to skip it.
+fn parse_sse_bytes<F>(
     stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
-) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
+    parse_event: F,
+) -> BoxStream<'static, Result<StreamResponse, A2AError>>
+where
+    F: Fn(&str) -> Option<Result<StreamResponse, A2AError>> + Clone + Send + 'static,
+{
     let mapped = stream::unfold(
-        (
-            Box::pin(stream),
-            Vec::<u8>::new(),
-            std::collections::VecDeque::<Result<StreamResponse, A2AError>>::new(),
-        ),
-        |(mut stream, mut buf, mut pending)| async move {
+        (Box::pin(stream), Vec::<u8>::new(), VecDeque::new(), parse_event),
+        |(mut stream, mut buf, mut pending, parse_event)| async move {
             loop {
-                // Drain already-parsed events BEFORE reading more bytes.
-                // Otherwise a single byte chunk carrying N complete SSE events
-                // would deliver only the first, and the remaining N-1 would be
-                // silently dropped if the connection closed before another
-                // chunk arrived (e.g. rapid final bursts with immediate close).
+                // Drain already-parsed events before reading more bytes.
+                // Without this, a single chunk carrying N complete SSE events
+                // would only deliver the first; the remaining N-1 would be
+                // silently dropped if the connection closed (burst-then-close).
                 if let Some(item) = pending.pop_front() {
-                    return Some((item, (stream, buf, pending)));
+                    return Some((item, (stream, buf, pending, parse_event)));
                 }
                 match stream.next().await {
                     Some(Ok(chunk)) => {
                         // Keep the buffer as raw bytes; defer UTF-8 decoding
                         // until an event boundary is found. Per-chunk
                         // `from_utf8_lossy` would silently replace multi-byte
-                        // characters split across chunk boundaries with
-                        // U+FFFD, corrupting user-visible text.
+                        // characters split across chunk boundaries with U+FFFD.
                         buf.extend_from_slice(&chunk);
-                        // Process complete SSE events (double newline terminated)
-                        while let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
-                            let event_bytes: Vec<u8> = buf.drain(..pos + 2).collect();
-                            let event_text = match std::str::from_utf8(&event_bytes[..pos]) {
+                        while let Some((start, end)) = find_event_boundary(&buf) {
+                            let event_bytes: Vec<u8> = buf.drain(..end).collect();
+                            let event_text = match std::str::from_utf8(&event_bytes[..start]) {
                                 Ok(s) => s,
                                 Err(e) => {
                                     pending.push_back(Err(A2AError::internal(format!(
@@ -173,59 +193,15 @@ fn parse_sse_stream(
                                 }
                             };
 
-                            // Extract data from SSE event
-                            let mut data = String::new();
-                            for line in event_text.lines() {
-                                if let Some(d) = line.strip_prefix("data: ") {
-                                    if !data.is_empty() {
-                                        data.push('\n');
-                                    }
-                                    data.push_str(d);
-                                } else if let Some(d) = line.strip_prefix("data:") {
-                                    if !data.is_empty() {
-                                        data.push('\n');
-                                    }
-                                    data.push_str(d);
-                                }
-                            }
-
-                            if data.is_empty() {
-                                continue;
-                            }
-
-                            // Parse as JSON-RPC response containing a StreamResponse
-                            match serde_json::from_str::<JsonRpcResponse>(&data) {
-                                Ok(rpc_resp) => {
-                                    if let Some(err) = rpc_resp.error {
-                                        pending
-                                            .push_back(Err(A2AError::new(err.code, err.message)));
-                                        continue;
-                                    }
-                                    if let Some(result) = rpc_resp.result {
-                                        match protojson_conv::from_value::<StreamResponse>(result) {
-                                            Ok(sr) => pending.push_back(Ok(sr)),
-                                            Err(e) => pending.push_back(Err(A2AError::internal(
-                                                format!("SSE parse error: {e}"),
-                                            ))),
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    // Try parsing directly as StreamResponse
-                                    match protojson_conv::from_str::<StreamResponse>(&data) {
-                                        Ok(sr) => pending.push_back(Ok(sr)),
-                                        Err(e) => pending.push_back(Err(A2AError::internal(
-                                            format!("SSE parse error: {e}"),
-                                        ))),
-                                    }
-                                }
+                            if let Some(result) = parse_event(event_text) {
+                                pending.push_back(result);
                             }
                         }
-                        // Loop back: pending may now hold events — drain before next read.
                     }
                     Some(Err(e)) => {
-                        pending
-                            .push_back(Err(A2AError::internal(format!("SSE stream error: {e}"))));
+                        pending.push_back(Err(A2AError::internal(format!(
+                            "SSE stream error: {e}"
+                        ))));
                     }
                     None => return None,
                 }
@@ -236,82 +212,86 @@ fn parse_sse_stream(
     Box::pin(mapped)
 }
 
+/// Parse an SSE byte stream into StreamResponse events (JSON-RPC envelope).
+fn parse_sse_stream(
+    stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
+    parse_sse_bytes(stream, |event_text| {
+        // Extract `data:` lines from the SSE event
+        let mut data = String::new();
+        for line in event_text.lines() {
+            if let Some(d) = line.strip_prefix("data: ") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(d);
+            } else if let Some(d) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(d);
+            }
+        }
+        if data.is_empty() {
+            return None;
+        }
+
+        // Try JSON-RPC envelope first
+        match serde_json::from_str::<JsonRpcResponse>(&data) {
+            Ok(rpc_resp) => {
+                if let Some(err) = rpc_resp.error {
+                    return Some(Err(A2AError::new(err.code, err.message)));
+                }
+                if let Some(result) = rpc_resp.result {
+                    match protojson_conv::from_value::<StreamResponse>(result) {
+                        Ok(sr) => Some(Ok(sr)),
+                        Err(e) => Some(Err(A2AError::internal(format!("SSE parse error: {e}")))),
+                    }
+                } else {
+                    None
+                }
+            }
+            Err(_) => {
+                // Fallback: parse directly as StreamResponse
+                match protojson_conv::from_str::<StreamResponse>(&data) {
+                    Ok(sr) => Some(Ok(sr)),
+                    Err(e) => Some(Err(A2AError::internal(format!("SSE parse error: {e}")))),
+                }
+            }
+        }
+    })
+}
+
 /// Parse an SSE byte stream into StreamResponse events (REST binding).
 /// Unlike the JSON-RPC variant, this expects data lines to contain
 /// raw StreamResponse JSON (not wrapped in a JSON-RPC envelope).
 pub(crate) fn parse_sse_stream_rest(
     stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 ) -> BoxStream<'static, Result<StreamResponse, A2AError>> {
-    let mapped = stream::unfold(
-        (
-            Box::pin(stream),
-            Vec::<u8>::new(),
-            std::collections::VecDeque::<Result<StreamResponse, A2AError>>::new(),
-        ),
-        |(mut stream, mut buf, mut pending)| async move {
-            loop {
-                // Drain already-parsed events before reading more bytes; see
-                // parse_sse_stream for the rationale (burst-then-close drops
-                // all but the first event without this).
-                if let Some(item) = pending.pop_front() {
-                    return Some((item, (stream, buf, pending)));
+    parse_sse_bytes(stream, |event_text| {
+        let mut data = String::new();
+        for line in event_text.lines() {
+            if let Some(d) = line.strip_prefix("data: ") {
+                if !data.is_empty() {
+                    data.push('\n');
                 }
-                match stream.next().await {
-                    Some(Ok(chunk)) => {
-                        // Defer UTF-8 decoding until event boundary; see
-                        // parse_sse_stream for the rationale (per-chunk
-                        // lossy decode corrupts multi-byte chars).
-                        buf.extend_from_slice(&chunk);
-                        while let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
-                            let event_bytes: Vec<u8> = buf.drain(..pos + 2).collect();
-                            let event_text = match std::str::from_utf8(&event_bytes[..pos]) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    pending.push_back(Err(A2AError::internal(format!(
-                                        "SSE UTF-8 decode error: {e}"
-                                    ))));
-                                    continue;
-                                }
-                            };
-
-                            let mut data = String::new();
-                            for line in event_text.lines() {
-                                if let Some(d) = line.strip_prefix("data: ") {
-                                    if !data.is_empty() {
-                                        data.push('\n');
-                                    }
-                                    data.push_str(d);
-                                } else if let Some(d) = line.strip_prefix("data:") {
-                                    if !data.is_empty() {
-                                        data.push('\n');
-                                    }
-                                    data.push_str(d);
-                                }
-                            }
-
-                            if data.is_empty() {
-                                continue;
-                            }
-
-                            match protojson_conv::from_str::<StreamResponse>(&data) {
-                                Ok(sr) => pending.push_back(Ok(sr)),
-                                Err(e) => pending.push_back(Err(A2AError::internal(format!(
-                                    "SSE parse error: {e}"
-                                )))),
-                            }
-                        }
-                    }
-                    Some(Err(e)) => {
-                        pending
-                            .push_back(Err(A2AError::internal(format!("SSE stream error: {e}"))));
-                    }
-                    None => return None,
+                data.push_str(d);
+            } else if let Some(d) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
                 }
+                data.push_str(d);
             }
-        },
-    );
+        }
+        if data.is_empty() {
+            return None;
+        }
 
-    Box::pin(mapped)
+        match protojson_conv::from_str::<StreamResponse>(&data) {
+            Ok(sr) => Some(Ok(sr)),
+            Err(e) => Some(Err(A2AError::internal(format!("SSE parse error: {e}")))),
+        }
+    })
 }
 
 #[async_trait]
@@ -1048,6 +1028,73 @@ mod tests {
             got.to_string().contains("SSE stream error"),
             "error should mention SSE stream error: {got}",
         );
+    }
+
+    /// SSE spec allows `\r\n\r\n`, `\n\n`, and `\r\r` as event separators.
+    /// This test exercises the `\r\n\r\n` variant.
+    #[tokio::test]
+    async fn test_parse_sse_stream_crlf_line_endings() {
+        let sr = StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+            task_id: "t1".into(),
+            context_id: "c1".into(),
+            status: TaskStatus {
+                state: TaskState::Working,
+                message: None,
+                timestamp: None,
+            },
+            metadata: None,
+        });
+        let data = serde_json::to_string(&protojson_conv::to_value(&sr).unwrap()).unwrap();
+        // Use \r\n\r\n instead of \n\n
+        let sse_text = format!("data: {}\r\n\r\n", data);
+
+        let stream = byte_stream(vec![sse_text]);
+        let mut parsed = parse_sse_stream(stream);
+        let item = parsed.next().await.unwrap().unwrap();
+        assert!(matches!(item, StreamResponse::StatusUpdate(_)));
+        assert!(parsed.next().await.is_none());
+    }
+
+    /// `\r\r` is also a valid SSE event separator per the spec.
+    #[tokio::test]
+    async fn test_parse_sse_stream_cr_line_endings() {
+        let sr = StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
+            task_id: "t1".into(),
+            context_id: "c1".into(),
+            status: TaskStatus {
+                state: TaskState::Completed,
+                message: None,
+                timestamp: None,
+            },
+            metadata: None,
+        });
+        let data = serde_json::to_string(&protojson_conv::to_value(&sr).unwrap()).unwrap();
+        let sse_text = format!("data: {}\r\r", data);
+
+        let stream = byte_stream(vec![sse_text]);
+        let mut parsed = parse_sse_stream_rest(stream);
+        let item = parsed.next().await.unwrap().unwrap();
+        assert!(matches!(item, StreamResponse::StatusUpdate(_)));
+    }
+
+    #[test]
+    fn test_find_event_boundary_lf() {
+        assert_eq!(find_event_boundary(b"foo\n\nbar"), Some((3, 5)));
+    }
+
+    #[test]
+    fn test_find_event_boundary_cr() {
+        assert_eq!(find_event_boundary(b"foo\r\rbar"), Some((3, 5)));
+    }
+
+    #[test]
+    fn test_find_event_boundary_crlf() {
+        assert_eq!(find_event_boundary(b"foo\r\n\r\nbar"), Some((3, 7)));
+    }
+
+    #[test]
+    fn test_find_event_boundary_none() {
+        assert!(find_event_boundary(b"no boundary here").is_none());
     }
 
     #[test]
